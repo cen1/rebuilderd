@@ -98,22 +98,11 @@ pub async fn get_distribution_release_architectures(
     freshness_filter: web::Query<FreshnessFilter>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
-    let release = derive_release(&path.1);
 
-    let mut query = source_packages::table
+    let distribution_release_architectures = source_packages::table
         .inner_join(build_inputs::table)
         .filter(source_packages::distribution.is(&path.0))
-        .filter(source_packages::release.is(release))
-        .into_boxed();
-
-    // Handle "null" string as NULL
-    if path.1 == "null" {
-        query = query.filter(source_packages::release.is_null());
-    } else {
-        query = query.filter(source_packages::release.is(&path.1));
-    }
-
-    let distribution_release_architectures = query
+        .filter(source_packages::release.is(&path.1))
         .filter(freshness_filter.into_inner().into_filter())
         .select(build_inputs::architecture)
         .distinct()
@@ -130,21 +119,10 @@ pub async fn get_distribution_release_components(
     freshness_filter: web::Query<FreshnessFilter>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
-    let release = derive_release(&path.1);
 
-    let mut query = source_packages::table
+    let distribution_release_components = source_packages::table
         .filter(source_packages::distribution.is(&path.0))
-        .filter(source_packages::release.is(release))
-        .into_boxed();
-
-    // Handle "null" string as NULL
-    if path.1 == "null" {
-        query = query.filter(source_packages::release.is_null());
-    } else {
-        query = query.filter(source_packages::release.is(&path.1));
-    }
-
-    let distribution_release_components = query
+        .filter(source_packages::release.is(&path.1))
         .filter(freshness_filter.into_inner().into_filter())
         .select(source_packages::component)
         .distinct()
@@ -170,15 +148,15 @@ pub async fn get_distribution_release_component_architectures(
         .filter(source_packages::component.is(&path.2))
         .into_boxed();
 
-    // Handle empty release or "null" string as NULL
-    if path.1.is_empty() || path.1 == "null" {
+    // Handle empty release as NULL
+    if path.1.is_empty() {
         query = query.filter(source_packages::release.is_null());
     } else {
         query = query.filter(source_packages::release.is(&path.1));
     }
 
-    // Handle empty component or "null" string as NULL
-    if path.2.is_empty() || path.2 == "null" {
+    // Handle empty component as NULL
+    if path.2.is_empty() {
         query = query.filter(source_packages::component.is_null());
     } else {
         query = query.filter(source_packages::component.is(&path.2));
