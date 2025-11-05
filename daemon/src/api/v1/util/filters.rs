@@ -72,12 +72,12 @@ impl<T: 'static> IntoSourceIdentityFilter<T, Sqlite> for SourceIdentityFilter {
             (Some(name), _) => {
                 // Exact match for name
                 Box::new(name_column.is(name))
-            },
+            }
             (None, Some(prefix)) => {
                 // LIKE pattern for name_starts_with - append % to the prefix
                 let pattern = format!("{}%", prefix);
                 Box::new(name_column.like(pattern))
-            },
+            }
             (None, None) => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
 
@@ -238,7 +238,9 @@ where
         };
 
         let component_is: Self::Output = match self.component {
-            Some(component) if !component.is_empty() => Box::new(source_packages::component.is(component)),
+            Some(component) if !component.is_empty() => {
+                Box::new(source_packages::component.is(component))
+            }
             Some(_) => Box::new(source_packages::component.is_null()), // Empty string means NULL
             None => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
