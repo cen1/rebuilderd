@@ -6,7 +6,7 @@ use diesel::query_builder::QueryFragment;
 use diesel::sql_types::{Bool, Text};
 use diesel::sqlite::Sqlite;
 use diesel::{BoolExpressionMethods, BoxableExpression, Expression, SelectableExpression};
-use diesel::{ExpressionMethods, SqliteExpressionMethods};
+use diesel::{ExpressionMethods, SqliteExpressionMethods, TextExpressionMethods};
 use rebuilderd_common::api::v1::{
     BinaryIdentityFilter, FreshnessFilter, OriginFilter, SourceIdentityFilter,
 };
@@ -56,6 +56,7 @@ impl<T: 'static> IntoSourceIdentityFilter<T, Sqlite> for SourceIdentityFilter {
             + QueryFragment<Sqlite>
             + ValidGrouping<(), IsAggregate = No>
             + ExpressionMethods
+            + SqliteExpressionMethods
             + Send
             + 'static,
         VersionColumn: SelectableExpression<T>
@@ -66,9 +67,18 @@ impl<T: 'static> IntoSourceIdentityFilter<T, Sqlite> for SourceIdentityFilter {
             + Send
             + 'static,
     {
-        let name_is: Self::Output = match self.name {
-            Some(name) => Box::new(name_column.is(name)),
-            None => Box::new(AsExpression::<Bool>::as_expression(true)),
+        // If both name and name_starts_with are set, name takes precedence
+        let name_is: Self::Output = match (self.name, self.name_starts_with) {
+            (Some(name), _) => {
+                // Exact match for name
+                Box::new(name_column.is(name))
+            },
+            (None, Some(prefix)) => {
+                // LIKE pattern for name_starts_with - append % to the prefix
+                let pattern = format!("{}%", prefix);
+                Box::new(name_column.like(pattern))
+            },
+            (None, None) => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
 
         let version_is: Self::Output = match self.version {
@@ -222,12 +232,14 @@ where
         };
 
         let release_is: Self::Output = match self.release {
-            Some(release) => Box::new(source_packages::release.is(release)),
+            Some(release) if !release.is_empty() => Box::new(source_packages::release.is(release)),
+            Some(_) => Box::new(source_packages::release.is_null()), // Empty string means NULL
             None => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
 
         let component_is: Self::Output = match self.component {
-            Some(component) => Box::new(source_packages::component.is(component)),
+            Some(component) if !component.is_empty() => Box::new(source_packages::component.is(component)),
+            Some(_) => Box::new(source_packages::component.is_null()), // Empty string means NULL
             None => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
 

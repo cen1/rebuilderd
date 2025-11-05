@@ -117,6 +117,7 @@ pub async fn request_rebuild(
 
     let source_identity_filter = SourceIdentityFilter {
         name: queue_request.name,
+        name_starts_with: None,
         version: queue_request.version,
     };
 
