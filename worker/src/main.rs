@@ -52,7 +52,7 @@ impl heartbeat::HeartBeat for HttpHeartBeat<'_> {
     }
 }
 
-async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigFile) -> Result<()> {
+async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigFile, worker_name: &Option<String>) -> Result<()> {
     info!("Requesting work from rebuilderd...");
     let supported_backends = config.backends.keys().map(String::from).collect::<Vec<_>>();
 
@@ -92,6 +92,7 @@ async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigF
                 build: config.build.clone(),
                 diffoscope: config.diffoscope.clone(),
                 privkey,
+                worker_name: worker_name.clone(),
             };
 
             let hb = HttpHeartBeat {
@@ -160,9 +161,10 @@ async fn run_worker_loop(
     client: &Client,
     privkey: &PrivateKey,
     config: &config::ConfigFile,
+    worker_name: &Option<String>,
 ) -> Result<()> {
     loop {
-        if let Err(err) = rebuild(client, privkey, config).await {
+        if let Err(err) = rebuild(client, privkey, config, worker_name).await {
             error!(
                 "Unexpected error, sleeping for {}s: {:#}",
                 API_ERROR_DELAY, err
@@ -227,14 +229,15 @@ async fn main() -> Result<()> {
                 cookie,
             )?;
 
-            client
-                .register_worker(RegisterWorkerRequest {
-                    name: args.name.unwrap_or("worker".to_string()),
-                })
-                .await
-                .context("Failed to register worker with rebuilderd daemon")?;
+            if config.signup_secret.is_some() {
+                client
+                    .register_worker(RegisterWorkerRequest {
+                        name: args.name.clone().unwrap_or("worker".to_string()),
+                    })
+                    .await?;
+            }
 
-            run_worker_loop(&client, &profile.privkey, &config).await?;
+            run_worker_loop(&client, &profile.privkey, &config, &args.name).await?;
         }
         // this is only really for debugging
         SubCommand::Build(build) => {
@@ -270,6 +273,7 @@ async fn main() -> Result<()> {
                     build: config.build,
                     diffoscope,
                     privkey: &profile.privkey,
+                    worker_name: args.name.clone(),
                 },
                 &mut log,
             )

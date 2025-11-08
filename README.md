@@ -47,6 +47,7 @@ afford to.
 | **Tails** | 🚀 experimental | ❌ | - | ❌ | [docs](https://tails.boum.org/contribute/build/) ([script](worker/rebuilder-tails.sh)) |
 | **Alpine** | ✨ planned | - | - | - | - |
 | **Fedora** | 🚀 experimental | ❌ | ❌ | ✔️ | [fedora-repro-build](https://github.com/keszybz/fedora-repro-build/) |
+| **FreeBSD** | 🚀 experimental | ❌ | ❌ | ✔️ | [poudriere](https://github.com/freebsd/poudriere) ([script](worker/rebuilder-freebsd.sh)) |
 
 **Docker**: There's a docker-compose example setup in this repository, but not
 all rebuilder backends support running inside of a docker container (for
@@ -270,6 +271,7 @@ cargo run --bin rebuilderd-worker -- \
 ## Dependencies
 
 Debian: pkg-config liblzma-dev libsqlite3-dev libzstd-dev
+FreeBSD: pkgconf xz sqlite3 zstd
 
 # Funding
 

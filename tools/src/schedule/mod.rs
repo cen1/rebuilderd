@@ -48,6 +48,7 @@ pub trait Pkg {
 pub mod archlinux;
 pub mod debian;
 pub mod fedora;
+pub mod freebsd;
 pub mod tails;
 
 #[cfg(test)]
