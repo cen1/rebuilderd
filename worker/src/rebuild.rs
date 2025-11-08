@@ -26,6 +26,7 @@ pub struct Context<'a> {
     pub build: config::Build,
     pub diffoscope: config::Diffoscope,
     pub privkey: &'a PrivateKey,
+    pub worker_name: Option<String>,
 }
 
 fn path_to_string(path: &Path) -> Result<String> {
@@ -258,6 +259,10 @@ async fn verify(
 
     let mut envs = HashMap::new();
     envs.insert("REBUILDERD_OUTDIR".into(), path_to_string(out_dir)?);
+
+    if let Some(worker_name) = &ctx.worker_name {
+        envs.insert("REBUILDERD_WORKER_NAME".into(), worker_name.clone());
+    }
 
     let opts = proc::Options {
         timeout: Duration::from_secs(timeout),

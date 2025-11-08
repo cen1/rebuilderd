@@ -1,0 +1,77 @@
+#!/bin/sh
+
+# PROVIDE: rebuilderd_worker
+# REQUIRE: LOGIN DAEMON NETWORKING
+# KEYWORD: shutdown
+
+# Add the following lines to /etc/rc.conf to enable rebuilderd_worker:
+#
+# rebuilderd_worker_enable="YES"
+# rebuilderd_worker_instances="1 2 3"  # space-separated list of worker instances
+#
+# Per-instance configuration (optional):
+# rebuilderd_worker_1_name="worker1"   # defaults to instance number
+# rebuilderd_worker_2_name="worker2"
+#
+# Global configuration:
+# rebuilderd_worker_conf="/usr/local/etc/rebuilderd-worker.conf"
+# rebuilderd_worker_user="root"        # user to run as (needs root for rebuilder backends)
+
+. /etc/rc.subr
+
+name="rebuilderd_worker"
+rcvar="${name}_enable"
+procname="/home/freebsd/rebuilderd/target/release/rebuilderd-worker"
+
+load_rc_config $name
+
+: "${rebuilderd_worker_enable:=NO}"
+: "${rebuilderd_worker_instances:=1}"
+: "${rebuilderd_worker_conf:=/usr/local/etc/rebuilderd-worker.conf}"
+: "${rebuilderd_worker_user:=root}"
+
+if [ -n "$2" ]; then
+    profile="$2"
+    eval "rebuilderd_worker_user=\${rebuilderd_worker_${profile}_user:-${rebuilderd_worker_user}}"
+    eval "rebuilderd_worker_name=\${rebuilderd_worker_${profile}_name:-${profile}}"
+else
+    profile="${rebuilderd_worker_instances%% *}"  # first instance
+    if [ -z "${profile}" ]; then
+        profile="default"
+    fi
+    eval "rebuilderd_worker_user=\${rebuilderd_worker_${profile}_user:-${rebuilderd_worker_user}}"
+    eval "rebuilderd_worker_name=\${rebuilderd_worker_${profile}_name:-${profile}}"
+fi
+
+pidfile="/var/run/${name}_${profile}.pid"
+logfile="/var/log/${name}_${profile}.log"
+
+command="/usr/sbin/daemon"
+command_args="-f -o ${logfile} -p ${pidfile} -u ${rebuilderd_worker_user} ${procname} -c ${rebuilderd_worker_conf} -n ${rebuilderd_worker_name} connect"
+
+start_precmd="${name}_prestart"
+
+rebuilderd_worker_prestart()
+{
+    # Check if config file exists
+    if [ ! -f "${rebuilderd_worker_conf}" ]; then
+        warn "Configuration file ${rebuilderd_worker_conf} does not exist"
+        return 1
+    fi
+
+    # Create pidfile directory if it doesn't exist
+    install -d -o root -g wheel -m 0755 /var/run
+}
+
+if [ $# -gt 1 ]; then
+    # Called with explicit instance, just run it
+    run_rc_command "$@"
+elif [ -n "${rebuilderd_worker_instances}" -a "${rebuilderd_worker_instances}" != "${rebuilderd_worker_instances#* }" ]; then
+    # Multiple instances configured, run all of them
+    for instance in ${rebuilderd_worker_instances}; do
+        /usr/local/etc/rc.d/rebuilderd_worker "$1" "${instance}"
+    done
+else
+    # Single instance
+    run_rc_command "$@"
+fi
