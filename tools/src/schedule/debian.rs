@@ -326,6 +326,9 @@ impl SyncState {
                     version: src.version.clone(),
                     url: src.buildinfo_url(architecture),
                     artifacts: Vec::new(),
+                    fbsd_ports_top_git_hash: None,
+                    fbsd_build_timestamp: None,
+                    fbsd_ports_top_git_timestamp: None,
                 };
 
                 report.packages.push(source_report);

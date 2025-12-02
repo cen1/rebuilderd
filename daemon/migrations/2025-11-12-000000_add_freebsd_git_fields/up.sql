@@ -1,0 +1,7 @@
+ALTER TABLE source_packages ADD COLUMN fbsd_ports_top_git_hash TEXT;
+ALTER TABLE source_packages ADD COLUMN fbsd_build_timestamp DATETIME;
+ALTER TABLE source_packages ADD COLUMN fbsd_ports_top_git_timestamp DATETIME;
+
+CREATE INDEX source_packages_fbsd_build_timestamp_idx ON source_packages (fbsd_build_timestamp);
+CREATE INDEX source_packages_fbsd_ports_top_git_hash_idx ON source_packages (fbsd_ports_top_git_hash);
+CREATE INDEX source_packages_fbsd_ports_top_git_timestamp_idx ON source_packages (fbsd_ports_top_git_timestamp);

@@ -61,6 +61,9 @@ async fn initial_import(client: &Client) -> Result<()> {
                 architecture: architecture.clone(),
                 url,
             }],
+            fbsd_ports_top_git_hash: None,
+            fbsd_build_timestamp: None,
+            fbsd_ports_top_git_timestamp: None,
         }],
     };
 
@@ -398,6 +401,9 @@ async fn main() -> Result<()> {
                         url: "https://example.com/bar-0.3.4.tar.zst".to_string(),
                     },
                 ],
+                fbsd_ports_top_git_hash: None,
+                fbsd_build_timestamp: None,
+                fbsd_ports_top_git_timestamp: None,
             }],
         };
 

@@ -17,6 +17,9 @@ pub struct SourcePackage {
     pub component: Option<String>,
     pub last_seen: NaiveDateTime,
     pub seen_in_last_sync: bool,
+    pub fbsd_ports_top_git_hash: Option<String>,
+    pub fbsd_build_timestamp: Option<NaiveDateTime>,
+    pub fbsd_ports_top_git_timestamp: Option<NaiveDateTime>,
 }
 
 #[derive(Insertable, AsChangeset, PartialEq, Eq, Debug, Clone)]
@@ -32,6 +35,9 @@ pub struct NewSourcePackage {
     pub component: Option<String>,
     pub last_seen: NaiveDateTime,
     pub seen_in_last_sync: bool,
+    pub fbsd_ports_top_git_hash: Option<String>,
+    pub fbsd_build_timestamp: Option<NaiveDateTime>,
+    pub fbsd_ports_top_git_timestamp: Option<NaiveDateTime>,
 }
 
 impl NewSourcePackage {

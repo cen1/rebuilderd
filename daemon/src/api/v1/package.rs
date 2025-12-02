@@ -205,6 +205,9 @@ pub async fn submit_package_report(
                 component: report.component.clone(),
                 last_seen: now.naive_utc(),
                 seen_in_last_sync: true,
+                fbsd_ports_top_git_hash: package_report.fbsd_ports_top_git_hash.clone(),
+                fbsd_build_timestamp: package_report.fbsd_build_timestamp,
+                fbsd_ports_top_git_timestamp: package_report.fbsd_ports_top_git_timestamp,
             };
 
             let source_package = new_source_package.upsert(conn.as_mut())?;

@@ -19,6 +19,12 @@ pub struct SourcePackageReport {
     pub version: String,
     pub url: String,
     pub artifacts: Vec<BinaryPackageReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fbsd_ports_top_git_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fbsd_build_timestamp: Option<NaiveDateTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fbsd_ports_top_git_timestamp: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

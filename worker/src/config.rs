@@ -40,6 +40,10 @@ pub struct Diffoscope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Backend {
     pub path: PathBuf,
+    /// Optional script to compare artifacts. If set, this script will be called
+    /// with two arguments (input and output paths) and its exit code determines
+    /// equality (0 = identical/GOOD, non-zero = different/BAD).
+    pub diff_post_script_path: Option<PathBuf>,
 }
 
 pub fn load(args: &Args) -> Result<ConfigFile> {
@@ -72,7 +76,7 @@ pub fn load(args: &Args) -> Result<ConfigFile> {
         })?;
 
         conf.backends
-            .insert(key.into(), Backend { path: path.into() });
+            .insert(key.into(), Backend { path: path.into(), diff_post_script_path: None });
     }
 
     Ok(conf)

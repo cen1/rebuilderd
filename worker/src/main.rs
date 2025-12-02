@@ -243,6 +243,7 @@ async fn main() -> Result<()> {
             let backend = if let Some(script_location) = build.script_location {
                 config::Backend {
                     path: script_location,
+                    diff_post_script_path: None,
                 }
             } else {
                 config

@@ -151,7 +151,7 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
     let input_path = inputs_dir.join(&input_filename);
 
     // rebuild
-    verify(ctx, log, &out_dir, &input_path).await?;
+    let _script_success = verify(ctx, log, &out_dir, &input_path).await?;
 
     // process results
     let mut results = Vec::new();
@@ -169,6 +169,94 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
                 diffoscope: None,
                 attestation: None,
                 status: ArtifactStatus::Bad,
+            }
+        } else if let Some(diff_script) = &ctx.backend.diff_post_script_path {
+            // Use custom diff script to compare artifacts
+            info!("Running custom diff script: {:?}", diff_script);
+
+            let mut diff_log = Vec::new();
+            let diff_opts = proc::Options {
+                timeout: Duration::from_secs(600), // 10 minutes for diff
+                size_limit: Some(10 * 1024 * 1024), // 10MB log limit
+                kill_at_size_limit: false,
+                passthrough: !ctx.build.silent,
+                envs: HashMap::new(),
+            };
+
+            let artifacts_identical = proc::run(
+                diff_script.as_ref(),
+                &[&artifact_path, &output_path],
+                diff_opts,
+                &mut diff_log,
+            ).await?;
+
+            if artifacts_identical {
+                info!(
+                    "Custom diff script verified artifact as GOOD: {:?}",
+                    output_path
+                );
+
+                let mut res = RebuildArtifactReport {
+                    name: artifact.name,
+                    diffoscope: None,
+                    attestation: None,
+                    status: ArtifactStatus::Good,
+                };
+
+                info!("Generating signed link");
+                match in_toto_run(
+                    &format!("rebuild {}", artifact_filename.to_str().unwrap()),
+                    None,
+                    &[input_path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("Input path contains invalid characters"))?],
+                    &[output_path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("Output path contains invalid characters"))?],
+                    &[],
+                    Some(ctx.privkey),
+                    Some(&["sha512", "sha256"]),
+                    Some(&[
+                        &format!("{}/", inputs_dir.to_str().unwrap()),
+                        &format!("{}/", out_dir.to_str().unwrap()),
+                    ]),
+                ) {
+                    Ok(signed_link) => {
+                        info!("Signed link generated");
+
+                        let attestation = serde_json::to_string(&signed_link)
+                            .context("Failed to serialize attestation")?;
+
+                        let encoded_attestation = zstd_compress(attestation.as_bytes())
+                            .await
+                            .map_err(Error::from)?;
+
+                        res.attestation = Some(encoded_attestation);
+                    }
+                    Err(err) => warn!("Failed to generate in-toto attestation: {:#?}", err),
+                }
+
+                res
+            } else {
+                info!(
+                    "Custom diff script verified artifact as BAD: {:?}",
+                    output_path
+                );
+
+                let mut res = RebuildArtifactReport {
+                    name: artifact.name,
+                    diffoscope: None,
+                    attestation: None,
+                    status: ArtifactStatus::Bad,
+                };
+
+                // Use the diff script output as diffoscope output
+                let encoded_diffoscope = zstd_compress(&diff_log)
+                    .await
+                    .map_err(Error::from)?;
+                res.diffoscope = Some(encoded_diffoscope);
+
+                res
             }
         } else if compare_files(&artifact_path, &output_path).await? {
             info!(
@@ -253,7 +341,7 @@ async fn verify(
     log: &mut Vec<u8>,
     out_dir: &Path,
     input_path: &Path,
-) -> Result<()> {
+) -> Result<bool> {
     let bin = &ctx.backend.path;
     let timeout = ctx.build.timeout.unwrap_or(3600 * 24); // 24h
 
@@ -272,9 +360,9 @@ async fn verify(
         envs,
     };
 
-    proc::run(bin.as_ref(), &[input_path], opts, log).await?;
+    let success = proc::run(bin.as_ref(), &[input_path], opts, log).await?;
 
-    Ok(())
+    Ok(success)
 }
 
 #[cfg(test)]

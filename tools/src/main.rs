@@ -174,12 +174,14 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| format_err!("Profile not found: {:?}", args.profile))?;
 
             // TODO: remove this after we've deprecated suite=
+            #[allow(deprecated)]
             if let Some(suite) = profile.suite {
                 warn!("Deprecated option in config: replace `suite = \"{}\"` with `components = [\"{}\"]`", suite, suite);
                 profile.components.push(suite)
             }
 
             // TODO: remove this after we've deprecated architecture=
+            #[allow(deprecated)]
             if let Some(arch) = profile.architecture {
                 warn!("Deprecated option in config: replace `architecture = \"{}\"` with `architectures = [\"{}\"]`", arch, arch);
                 profile.architectures.push(arch)
@@ -199,11 +201,12 @@ async fn main() -> Result<()> {
                     maintainers: profile.maintainers,
                     pkgs: patterns_from(&profile.pkgs)?,
                     excludes: patterns_from(&profile.excludes)?,
+                    github_token: profile.github_token.or_else(|| std::env::var("GITHUB_TOKEN").ok()),
                 },
             )
             .await?;
         }
-        SubCommand::Pkgs(Pkgs::SyncStdin(sync)) => {
+        SubCommand::Pkgs(Pkgs::SyncStdin(_sync)) => {
             let mut stdin = tokio::io::stdin();
             let mut buf = Vec::new();
             stdin.read_to_end(&mut buf).await?;
@@ -410,22 +413,28 @@ async fn main() -> Result<()> {
         }
         SubCommand::Queue(Queue::Delete(push)) => {
             let origin_filter = OriginFilter {
-                distribution: Some(push.distro),
+                distribution: Some(push.distro.clone()),
                 release: None, // TODO: ls.filter.release,
-                component: Some(push.suite),
-                architecture: push.architecture,
+                component: push.suite.clone(),
+                architecture: push.architecture.clone(),
             };
 
-            let identity_filter = IdentityFilter {
-                name: Some(push.name),
-                name_starts_with: None,
-                version: push.version,
+            let identity_filter = if push.name.is_some() || push.version.is_some() {
+                Some(IdentityFilter {
+                    name: push.name.clone(),
+                    name_starts_with: None,
+                    version: push.version.clone(),
+                })
+            } else {
+                None
             };
 
-            client
+            let dropped = client
                 .with_auth_cookie()?
-                .drop_queued_jobs(Some(&origin_filter), Some(&identity_filter))
+                .drop_queued_jobs(Some(&origin_filter), identity_filter.as_ref())
                 .await?;
+
+            println!("Dropped {} queued job(s)", dropped);
         }
         SubCommand::Completions(completions) => args::gen_completions(&completions)?,
     }
