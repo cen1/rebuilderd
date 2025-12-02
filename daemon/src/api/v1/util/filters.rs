@@ -74,9 +74,11 @@ impl<T: 'static> IntoSourceIdentityFilter<T, Sqlite> for SourceIdentityFilter {
                 Box::new(name_column.is(name))
             }
             (None, Some(prefix)) => {
-                // LIKE pattern for name_starts_with - append % to the prefix
-                let pattern = format!("{}%", prefix);
-                Box::new(name_column.like(pattern))
+                // LIKE pattern for name_starts_with
+                // In SQLite, LIKE is case-insensitive for ASCII by default, but
+                // package names might start with lowercase, so we match both
+                let lower_pattern = format!("{}%", prefix.to_lowercase());
+                Box::new(name_column.like(lower_pattern))
             }
             (None, None) => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
@@ -238,10 +240,10 @@ where
         };
 
         let component_is: Self::Output = match self.component {
-            Some(component) if !component.is_empty() => {
+            Some(component) if !component.is_empty() && component != "null" => {
                 Box::new(source_packages::component.is(component))
             }
-            Some(_) => Box::new(source_packages::component.is_null()), // Empty string means NULL
+            Some(_) => Box::new(source_packages::component.is_null()), // Empty string or "null" means NULL
             None => Box::new(AsExpression::<Bool>::as_expression(true)),
         };
 

@@ -18,8 +18,14 @@ use rebuilderd_common::api::v1::{
     QueuedJob, QueuedJobArtifact, QueuedJobWithArtifacts, ResultPage, SourceIdentityFilter,
 };
 use rebuilderd_common::config::PING_DEADLINE;
-use rebuilderd_common::errors::*;
+use rebuilderd_common::errors::Error;
+use serde::Serialize;
 use std::collections::HashSet;
+
+#[derive(Serialize)]
+struct DropResponse {
+    dropped: usize,
+}
 
 #[diesel::dsl::auto_type]
 fn queue_base() -> _ {
@@ -134,7 +140,7 @@ pub async fn request_rebuild(
                 .clone()
                 .into_filter(source_packages::name, source_packages::version),
         )
-        .select(build_inputs::id)
+        .select((build_inputs::id, source_packages::last_seen))
         .into_boxed();
 
     if let Some(status) = queue_request.status {
@@ -145,12 +151,12 @@ pub async fn request_rebuild(
         }
     }
 
-    let build_input_ids = sql
-        .get_results::<i32>(connection.as_mut())
+    let build_inputs = sql
+        .get_results::<(i32, NaiveDateTime)>(connection.as_mut())
         .map_err(Error::from)?;
 
     let now = Utc::now();
-    for build_input_id in build_input_ids {
+    for (build_input_id, _) in build_inputs {
         let next_retry = (now - Duration::minutes(1)).naive_utc();
         let priority = queue_request.priority.unwrap_or(Priority::manual());
         if has_queued_friend(connection.as_mut(), build_input_id)? {
@@ -205,7 +211,7 @@ pub async fn drop_queued_jobs(
     source_identity_filter: web::Query<SourceIdentityFilter>,
 ) -> web::Result<impl Responder> {
     if auth::admin(&cfg, &req).is_err() {
-        return Ok(HttpResponse::Forbidden());
+        return Ok(HttpResponse::Forbidden().finish());
     }
 
     let mut connection = pool.get().map_err(Error::from)?;
@@ -228,11 +234,13 @@ pub async fn drop_queued_jobs(
         .load::<i32>(connection.as_mut())
         .map_err(Error::from)?;
 
+    let count = ids.len();
+
     diesel::delete(queue::table.filter(queue::id.eq_any(ids)))
         .execute(connection.as_mut())
         .map_err(Error::from)?;
 
-    Ok(HttpResponse::NoContent())
+    Ok(HttpResponse::Ok().json(DropResponse { dropped: count }))
 }
 
 #[get("/{id}")]
@@ -388,7 +396,16 @@ pub async fn request_work(
 
     if let Some(record) =
         connection.transaction::<Option<QueuedJobWithArtifacts>, _, _>(|conn| {
-            if let Some(record) = queue_base()
+            // Check if there's already a FreeBSD job in progress (single-worker constraint)
+            let freebsd_in_progress = queue::table
+                .filter(queue::worker.is_not_null())
+                .inner_join(build_inputs::table.inner_join(source_packages::table))
+                .filter(source_packages::distribution.eq("freebsd"))
+                .count()
+                .get_result::<i64>(conn)
+                .map_err(Error::from)? > 0;
+
+            let mut query = queue_base()
                 .filter(queue::worker.is_null())
                 .filter(
                     build_inputs::next_retry
@@ -397,10 +414,19 @@ pub async fn request_work(
                 )
                 .filter(build_inputs::architecture.eq_any(supported_architectures))
                 .filter(build_inputs::backend.eq_any(pop_request.supported_backends))
+                .into_boxed();
+
+            // If a FreeBSD job is in progress, skip all FreeBSD jobs
+            if freebsd_in_progress {
+                query = query.filter(source_packages::distribution.ne("freebsd"));
+            }
+
+            if let Some(record) = query
                 .order_by((
                     queue::priority,
                     diesel::dsl::date(queue::queued_at),
-                    sqlite_random(),
+                    source_packages::fbsd_ports_top_git_timestamp.asc(),
+                    source_packages::id.asc(),
                 ))
                 .first::<QueuedJob>(conn)
                 .optional()

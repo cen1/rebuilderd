@@ -98,6 +98,9 @@ pub struct PkgsSync {
 
     #[arg(long)]
     pub sync_method: Option<String>,
+
+    #[arg(long)]
+    pub github_token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -195,11 +198,11 @@ pub struct QueuePush {
 #[derive(Debug, Parser)]
 pub struct QueueDrop {
     pub distro: String,
-    pub suite: String,
+    pub suite: Option<String>,
     #[arg(long)]
     pub architecture: Option<String>,
 
-    pub name: String,
+    pub name: Option<String>,
     pub version: Option<String>,
 }
 

@@ -185,7 +185,7 @@ pub trait QueueRestApi {
         &self,
         origin_filter: Option<&OriginFilter>,
         source_identity_filter: Option<&SourceIdentityFilter>,
-    ) -> Result<()>;
+    ) -> Result<usize>;
     async fn request_work(&self, request: PopQueuedJobRequest) -> Result<JobAssignment>;
     async fn ping_job(&self, id: i32) -> Result<()>;
 }
@@ -583,15 +583,23 @@ impl QueueRestApi for Client {
         &self,
         origin_filter: Option<&OriginFilter>,
         source_identity_filter: Option<&SourceIdentityFilter>,
-    ) -> Result<()> {
-        self.delete(Cow::Borrowed("api/v1/queue"))
+    ) -> Result<usize> {
+        #[derive(serde::Deserialize)]
+        struct DropResponse {
+            dropped: usize,
+        }
+
+        let response: DropResponse = self
+            .delete(Cow::Borrowed("api/v1/queue"))
             .query(&origin_filter)
             .query(&source_identity_filter)
             .send()
             .await?
-            .error_for_status()?;
+            .error_for_status()?
+            .json()
+            .await?;
 
-        Ok(())
+        Ok(response.dropped)
     }
 
     async fn request_work(&self, request: PopQueuedJobRequest) -> Result<JobAssignment> {

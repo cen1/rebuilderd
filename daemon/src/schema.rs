@@ -88,7 +88,10 @@ diesel::table! {
         release -> Nullable<Text>,
         component -> Nullable<Text>,
         last_seen -> Timestamp,
-        seen_in_last_sync -> Bool
+        seen_in_last_sync -> Bool,
+        fbsd_ports_top_git_hash -> Nullable<Text>,
+        fbsd_build_timestamp -> Nullable<Timestamp>,
+        fbsd_ports_top_git_timestamp -> Nullable<Timestamp>,
     }
 }
 

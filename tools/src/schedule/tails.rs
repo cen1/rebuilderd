@@ -82,6 +82,9 @@ pub async fn sync(http: &http::Client, sync: &PkgsSync) -> Result<Vec<PackageRep
                         version: version.to_string(),
                         url: url.clone(), // use first artifact's url as the source URL for now
                         artifacts: vec![artifact],
+                        fbsd_ports_top_git_hash: None,
+                        fbsd_build_timestamp: None,
+                        fbsd_ports_top_git_timestamp: None,
                     };
 
                     group = Some(new_group);

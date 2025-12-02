@@ -175,6 +175,7 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| format_err!("Profile not found: {:?}", args.profile))?;
 
             // TODO: remove this after we've deprecated suite=
+            #[allow(deprecated)]
             if let Some(suite) = profile.suite {
                 warn!(
                     "Deprecated option in config: replace `suite = \"{}\"` with `components = [\"{}\"]`",
@@ -184,6 +185,7 @@ async fn main() -> Result<()> {
             }
 
             // TODO: remove this after we've deprecated architecture=
+            #[allow(deprecated)]
             if let Some(arch) = profile.architecture {
                 warn!(
                     "Deprecated option in config: replace `architecture = \"{}\"` with `architectures = [\"{}\"]`",
@@ -206,6 +208,7 @@ async fn main() -> Result<()> {
                     maintainers: profile.maintainers,
                     pkgs: patterns_from(&profile.pkgs)?,
                     excludes: patterns_from(&profile.excludes)?,
+                    github_token: profile.github_token.or_else(|| std::env::var("GITHUB_TOKEN").ok()),
                 },
             )
             .await?;
@@ -433,10 +436,10 @@ async fn main() -> Result<()> {
         }
         SubCommand::Queue(Queue::Delete(push)) => {
             let origin_filter = OriginFilter {
-                distribution: Some(push.distro),
+                distribution: Some(push.distro.clone()),
                 release: None, // TODO: ls.filter.release,
-                component: Some(push.suite),
-                architecture: push.architecture,
+                component: push.suite.clone(),
+                architecture: push.architecture.clone(),
             };
 
             let source_identity_filter = SourceIdentityFilter {
@@ -445,10 +448,12 @@ async fn main() -> Result<()> {
                 version: push.version,
             };
 
-            client
+            let dropped = client
                 .with_auth_cookie()?
                 .drop_queued_jobs(Some(&origin_filter), Some(&source_identity_filter))
                 .await?;
+
+            println!("Dropped {} queued job(s)", dropped);
         }
         SubCommand::Completions(completions) => args::gen_completions(&completions)?,
     }

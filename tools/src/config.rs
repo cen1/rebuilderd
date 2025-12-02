@@ -49,4 +49,6 @@ pub struct SyncProfile {
 
     #[serde(default)]
     pub excludes: Vec<String>,
+
+    pub github_token: Option<String>,
 }
