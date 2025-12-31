@@ -68,8 +68,10 @@ impl<T: 'static> IntoIdentityFilter<T, Sqlite> for IdentityFilter {
         // If both name and name_starts_with are set, name takes precedence
         let name_is: Self::Output = match (self.name, self.name_starts_with) {
             (Some(name), _) => {
-                // Exact match for name
-                Box::new(name_column.is(name))
+                // Substring match for name (case-insensitive search)
+                // Use %pattern% to match anywhere in the name
+                let lower_pattern = format!("%{}%", name.to_lowercase());
+                Box::new(name_column.like(lower_pattern))
             }
             (None, Some(prefix)) => {
                 // LIKE pattern for name_starts_with

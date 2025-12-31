@@ -22,6 +22,9 @@ _endpoint=_
 _signup_secret=_
 	The server would either allowlist our key or require a signup secret.
 
+_idle_delay=_
+	Number of seconds to sleep when no work is available (defaults to 180 seconds).
+
 ## [build]
 
 _timeout=_
@@ -51,6 +54,21 @@ _max_bytes=_
 	Set a maximum diffoscope output limit in bytes (default: none).
 	When reaching this limit diffoscope is terminated and the output is truncated.
 
+## [backend."distro"]
+
+Each backend defines how to rebuild packages for a specific distribution.
+
+_path=_
+	Path to the rebuilder script for this distribution (required).
+
+_diff_post_script_path=_
+	Optional path to a custom comparison script. If specified, this script will
+	be used instead of the default hash-based comparison to verify if the
+	rebuilt artifact matches the original. The script receives two arguments
+	(original and rebuilt artifact paths) and should exit with 0 if they are
+	identical/reproducible, or non-zero if different. The script's output will
+	be captured and included in the build report as diffoscope output.
+
 # EXAMPLE
 
 ```
@@ -75,6 +93,11 @@ enabled = false
 ## Set a maximum diffoscope output limit in bytes (default: none).
 ## When reaching this limit diffoscope is terminated and the output is truncated.
 max_bytes = 41943040 # 40 MiB
+
+[backend."freebsd"]
+path = "/usr/libexec/rebuilderd/rebuilder-freebsd.sh"
+## Optional: Use custom comparison script for content-level reproducibility
+diff_post_script_path = "/usr/libexec/rebuilderd/differ-freebsd.sh"
 ```
 
 # SEE ALSO

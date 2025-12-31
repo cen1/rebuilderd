@@ -439,13 +439,39 @@ pub async fn get_source_packages(
     if let Some(ref statuses) = status_filter.status {
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
-            query = query.filter(
-                r1.field(rebuilds::status).is_not_null().and(
-                    r1.field(rebuilds::status)
-                        .assume_not_null()
-                        .eq_any(status_values),
-                ),
-            );
+
+            // Check if UNKWN is requested (packages that haven't been built have NULL status)
+            let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
+            let other_statuses: Vec<String> = status_values
+                .iter()
+                .filter(|s| *s != "UNKWN")
+                .cloned()
+                .collect();
+
+            if has_unkwn && !other_statuses.is_empty() {
+                // Filter for both NULL (UNKWN) and other specific statuses
+                query = query.filter(
+                    r1.field(rebuilds::status).is_null().or(
+                        r1.field(rebuilds::status).is_not_null().and(
+                            r1.field(rebuilds::status)
+                                .assume_not_null()
+                                .eq_any(other_statuses),
+                        ),
+                    ),
+                );
+            } else if has_unkwn {
+                // Only UNKWN requested - filter for NULL status
+                query = query.filter(r1.field(rebuilds::status).is_null());
+            } else {
+                // Only other statuses requested
+                query = query.filter(
+                    r1.field(rebuilds::status).is_not_null().and(
+                        r1.field(rebuilds::status)
+                            .assume_not_null()
+                            .eq_any(other_statuses),
+                    ),
+                );
+            }
         }
     }
 
@@ -474,13 +500,39 @@ pub async fn get_source_packages(
     if let Some(ref statuses) = status_filter.status {
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
-            count_query = count_query.filter(
-                r1.field(rebuilds::status).is_not_null().and(
-                    r1.field(rebuilds::status)
-                        .assume_not_null()
-                        .eq_any(status_values),
-                ),
-            );
+
+            // Check if UNKWN is requested (packages that haven't been built have NULL status)
+            let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
+            let other_statuses: Vec<String> = status_values
+                .iter()
+                .filter(|s| *s != "UNKWN")
+                .cloned()
+                .collect();
+
+            if has_unkwn && !other_statuses.is_empty() {
+                // Filter for both NULL (UNKWN) and other specific statuses
+                count_query = count_query.filter(
+                    r1.field(rebuilds::status).is_null().or(
+                        r1.field(rebuilds::status).is_not_null().and(
+                            r1.field(rebuilds::status)
+                                .assume_not_null()
+                                .eq_any(other_statuses),
+                        ),
+                    ),
+                );
+            } else if has_unkwn {
+                // Only UNKWN requested - filter for NULL status
+                count_query = count_query.filter(r1.field(rebuilds::status).is_null());
+            } else {
+                // Only other statuses requested
+                count_query = count_query.filter(
+                    r1.field(rebuilds::status).is_not_null().and(
+                        r1.field(rebuilds::status)
+                            .assume_not_null()
+                            .eq_any(other_statuses),
+                    ),
+                );
+            }
         }
     }
 
@@ -542,13 +594,39 @@ pub async fn get_binary_packages(
     if let Some(ref statuses) = status_filter.status {
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
-            query = query.filter(
-                rebuild_artifacts::status.is_not_null().and(
-                    rebuild_artifacts::status
-                        .assume_not_null()
-                        .eq_any(status_values),
-                ),
-            );
+
+            // Check if UNKWN is requested (packages that haven't been built have NULL status)
+            let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
+            let other_statuses: Vec<String> = status_values
+                .iter()
+                .filter(|s| *s != "UNKWN")
+                .cloned()
+                .collect();
+
+            if has_unkwn && !other_statuses.is_empty() {
+                // Filter for both NULL (UNKWN) and other specific statuses
+                query = query.filter(
+                    rebuild_artifacts::status.is_null().or(
+                        rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status
+                                .assume_not_null()
+                                .eq_any(other_statuses),
+                        ),
+                    ),
+                );
+            } else if has_unkwn {
+                // Only UNKWN requested - filter for NULL status
+                query = query.filter(rebuild_artifacts::status.is_null());
+            } else {
+                // Only other statuses requested
+                query = query.filter(
+                    rebuild_artifacts::status.is_not_null().and(
+                        rebuild_artifacts::status
+                            .assume_not_null()
+                            .eq_any(other_statuses),
+                    ),
+                );
+            }
         }
     }
 
@@ -577,13 +655,39 @@ pub async fn get_binary_packages(
     if let Some(ref statuses) = status_filter.status {
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
-            count_query = count_query.filter(
-                rebuild_artifacts::status.is_not_null().and(
-                    rebuild_artifacts::status
-                        .assume_not_null()
-                        .eq_any(status_values),
-                ),
-            );
+
+            // Check if UNKWN is requested (packages that haven't been built have NULL status)
+            let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
+            let other_statuses: Vec<String> = status_values
+                .iter()
+                .filter(|s| *s != "UNKWN")
+                .cloned()
+                .collect();
+
+            if has_unkwn && !other_statuses.is_empty() {
+                // Filter for both NULL (UNKWN) and other specific statuses
+                count_query = count_query.filter(
+                    rebuild_artifacts::status.is_null().or(
+                        rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status
+                                .assume_not_null()
+                                .eq_any(other_statuses),
+                        ),
+                    ),
+                );
+            } else if has_unkwn {
+                // Only UNKWN requested - filter for NULL status
+                count_query = count_query.filter(rebuild_artifacts::status.is_null());
+            } else {
+                // Only other statuses requested
+                count_query = count_query.filter(
+                    rebuild_artifacts::status.is_not_null().and(
+                        rebuild_artifacts::status
+                            .assume_not_null()
+                            .eq_any(other_statuses),
+                    ),
+                );
+            }
         }
     }
 

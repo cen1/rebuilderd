@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-set -xeo pipefail
+set -eo pipefail
 
 # https://pkg-status.freebsd.org/
 # https://api.github.com/repos/freebsd/freebsd-ports/commits?sha=main&per_page=1000
 # rebuilder-freebsd.sh: A script to rebuild FreeBSD packages for rebuilderd.
 # This script is invoked by the rebuilderd-worker.
+# Manual testing: 
 # fetch https://pkg.freebsd.org/FreeBSD:14:amd64/latest/All/hello-2.12.2.pkg
 # REBUILDERD_OUTDIR=/tmp/out JAIL=rebuilderd-1-14-amd64 PORTS_TREE=worker1 ./rebuilder-freebsd.sh hello-2.12.2.pkg
 
@@ -85,9 +86,17 @@ PKG_ARCH=$(echo "$PKG_ARCH_FULL" | cut -d ':' -f 3)
 
 # Extract FreeBSD version to determine RELEASE version
 FREEBSD_VERSION_NUM=$(pkg info -F "$INPUT_PKG" | grep 'FreeBSD_version' | awk '{print $2}')
-# Convert version number to RELEASE format (e.g., 1403000 -> 14.3-RELEASE)
-# Format: MAJOR*100000 + MINOR*1000
-FREEBSD_MINOR=$((FREEBSD_VERSION_NUM / 1000 % 100))
+
+# For noarch packages (arch=*), FreeBSD_version may not be present
+# In that case, default to MAJOR.0-RELEASE
+if [ -z "$FREEBSD_VERSION_NUM" ]; then
+  echo "Note: FreeBSD_version not found (likely noarch package), using ${FREEBSD_MAJOR}.0-RELEASE"
+  FREEBSD_MINOR=0
+else
+  # Convert version number to RELEASE format (e.g., 1403000 -> 14.3-RELEASE)
+  # Format: MAJOR*100000 + MINOR*1000
+  FREEBSD_MINOR=$((FREEBSD_VERSION_NUM / 1000 % 100))
+fi
 FREEBSD_RELEASE="${FREEBSD_MAJOR}.${FREEBSD_MINOR}-RELEASE"
 
 rm -rf "$PKG_DIR"
@@ -97,6 +106,8 @@ if [ -z "$ORIGIN" ]; then
   exit 1
 fi
 
+# TODO: dynamic jail and ports tree naming for multiple worker per server support
+# We currently assume single worker for simplicity
 # Auto jail and ports tree setup
 # Use worker name from environment, fallback to hostname if not set
 WORKER_NAME="${REBUILDERD_WORKER_NAME:-$(hostname -s)}"
@@ -104,7 +115,6 @@ WORKER_NAME="${REBUILDERD_WORKER_NAME:-$(hostname -s)}"
 if [ -z "$JAIL" ]; then
   JAIL="rebuilderd-${WORKER_NAME}-${FREEBSD_MAJOR}-${PKG_ARCH}"
 fi
-# Use separate ports tree per worker to avoid git checkout conflicts
 if [ -z "$PORTS_TREE" ]; then
   PORTS_TREE="worker${WORKER_NAME}"
 fi
@@ -175,21 +185,23 @@ if [ -z "$PORTS_GIT_HASH" ]; then
 fi
 
 # Detect hash length and configure git to match
-HASH_LENGTH=${#PORTS_GIT_HASH}
-echo "Configuring git to use $HASH_LENGTH-char hashes to match original package"
-git config --global core.abbrev "$HASH_LENGTH"
+# Fixed in https://github.com/freebsd/poudriere/issues/1286
+# Left as documentation
+# HASH_LENGTH=${#PORTS_GIT_HASH}
+# echo "Configuring git to use $HASH_LENGTH-char hashes to match original package"
+# git config --global core.abbrev "$HASH_LENGTH"
 
 # 2. Prepare build environment and build
 # This script assumes that poudriere is installed and configured.
 # A poudriere jail and a ports tree must be set up.
-# The rebuilderd user needs privileges to run poudriere (e.g., via sudo).
-#
-# Example poudriere setup:
-#   poudriere jail -c -j 14.2-RELEASE -v 14.2-RELEASE
-#   poudriere ports -c -p main -m git
+# The rebuilderd user needs privileges to run poudriere.
 
 # 3. Checkout the correct ports tree commit
-# Checkout the specific git commit in the ports tree
+# Rebuilderd daemon will sort packages by ports tree commit timestamp
+# and send them one by one. This way we reduce jumping around in time
+# and simulate the upstream CI build process more closely which hopefully improves rebuildability.
+# It also means less rebuilds of the same dependency packages.
+# Failed retried packages obviously break that logic but we have to live with that for now.
 PORTS_DIR="/usr/local/poudriere/ports/${PORTS_TREE}"
 if [ ! -d "$PORTS_DIR/.git" ]; then
   echo "Error: Poudriere ports tree '$PORTS_DIR' is not a git repository." >&2
@@ -208,6 +220,9 @@ if ! git -C "$PORTS_DIR" checkout "$PORTS_GIT_HASH" 2>/dev/null; then
 fi
 
 # Set SOURCE_DATE_EPOCH to the commit time for reproducible builds
+# This doesn't really do anything to improve reproducibility at the moment because neither upstream CI
+# nor poudriere set this but hopefully once upstream and poudriere starts setting it to something we're ready.
+# Ticket: https://github.com/freebsd/poudriere/issues/1287
 SOURCE_DATE_EPOCH=$(git -C "$PORTS_DIR" show -s --format=%ct "$PORTS_GIT_HASH")
 if [ -n "$SOURCE_DATE_EPOCH" ]; then
   export SOURCE_DATE_EPOCH
@@ -255,27 +270,50 @@ if [ -d "$BUILDING_DIR" ]; then
 fi
 
 # Configure git in the jail to use 10-char abbreviated hashes
-JAIL_ROOT="/usr/local/poudriere/jails/${JAIL}"
-if [ -d "$JAIL_ROOT" ]; then
-  echo "Configuring git in jail to use 10-char hashes..."
-  mkdir -p "$JAIL_ROOT/root/.config/git"
-  cat > "$JAIL_ROOT/root/.config/git/config" << EOF
-[core]
-	abbrev = 10
-EOF
-fi
+# Only affects non-reproducability of MANIFEST which we ignore anyway at the moment.
+# Fixed in https://github.com/freebsd/poudriere/issues/1286 but leaving for documentation.
+# JAIL_ROOT="/usr/local/poudriere/jails/${JAIL}"
+# if [ -d "$JAIL_ROOT" ]; then
+#   echo "Configuring git in jail to use 10-char hashes..."
+#   mkdir -p "$JAIL_ROOT/root/.config/git"
+#   cat > "$JAIL_ROOT/root/.config/git/config" << EOF
+# [core]
+# 	abbrev = 10
+# EOF
+# fi
 
 # The following command will build the port and its dependencies.
 # The official build flags should be configured in poudriere.conf, for example:
-#   ALLOW_MAKE_JOBS=yes
-#   PREPARE_PARALLEL_JOBS=4
-#   MAKE_JOBS_NUMBER=4
-# Also, respect flags like WITH_DOCS=off, etc. by configuring them in make.conf.
+
+# If package depends on rust/llvm you will get OoOmed with anything less than 32G RAM
+# Reducing parallel jobs can help somewhat.
+# Detect if both rust and llvm will be built (memory-intensive combination)
+# Toggle manually if constrained
+if false ; then
+  echo "Checking if build requires memory-intensive dependencies (rust and llvm)..."
+  POUDRIERE_BULK_ARGS=""
+
+  # Use poudriere to check what will be built (dry-run)
+  BUILD_LIST=$(poudriere bulk -n -j "$JAIL" -p "$PORTS_TREE" "$ORIGIN" 2>&1 | grep -E "^\[" | grep -oE "(lang/rust|devel/llvm[0-9]*|devel/cmake)" || true)
+
+  # Count how many memory-intensive packages will be built
+  HAS_RUST=$(echo "$BUILD_LIST" | grep -c "lang/rust" || true)
+  HAS_LLVM=$(echo "$BUILD_LIST" | grep -c "devel/llvm" || true)
+  HAS_CMAKE=$(echo "$BUILD_LIST" | grep -c "devel/cmake" || true)
+
+  # If building both rust and llvm, limit to 1 builder to avoid OOM
+  if [ "$HAS_RUST" -gt 0 ] && [ "$HAS_LLVM" -gt 0 ]; then
+    echo "⚠️  WARNING: Build requires both rust and llvm - limiting to 1 parallel builder to prevent OOM"
+    POUDRIERE_BULK_ARGS="-J 1"
+  elif [ "$HAS_RUST" -gt 0 ] || [ "$HAS_LLVM" -gt 0 ]; then
+    echo "Note: Build requires rust or llvm - these are memory-intensive"
+  fi
+fi
 
 # Run poudriere bulk and handle "jail already running" error
 # Use tee to show output in real-time while capturing to file
 set +e
-poudriere bulk -j "$JAIL" -p "$PORTS_TREE" "$ORIGIN" 2>&1 | tee /tmp/poudriere_output.log
+poudriere bulk -j "$JAIL" -p "$PORTS_TREE" $POUDRIERE_BULK_ARGS "$ORIGIN" 2>&1 | tee /tmp/poudriere_output.log
 POUDRIERE_EXIT=${PIPESTATUS[0]}
 set -e
 
@@ -293,6 +331,20 @@ fi
 rm -f /tmp/poudriere_output.log
 echo "Build completed successfully."
 
+# Output the poudriere build log for rebuilderd to capture
+POUDRIERE_LOG_DIR="/usr/local/poudriere/data/logs/bulk/${JAIL}-${PORTS_TREE}/latest/logs"
+BUILD_LOG_PATH="${POUDRIERE_LOG_DIR}/${ORIGIN}.log"
+
+if [ -f "$BUILD_LOG_PATH" ]; then
+    echo ""
+    echo "=== Poudriere Build Log ==="
+    cat "$BUILD_LOG_PATH"
+    echo "==========================="
+    echo ""
+else
+    echo "Warning: Poudriere build log not found at: $BUILD_LOG_PATH" >&2
+fi
+
 # 4. Output the rebuilt package
 # poudriere places the built packages in a directory structure.
 # We need to find the correct package and move it to REBUILDERD_OUTDIR.
@@ -304,62 +356,11 @@ if [ -z "$BUILT_PKG" ] || [ ! -f "$BUILT_PKG" ]; then
     exit 1
 fi
 
-# Move the package to the output directory.
+# Move the package to the output directory
+# The differ script will handle comparison and can tolerate metadata differences
+echo "Moving rebuilt package to output directory..."
 mv "$BUILT_PKG" "$REBUILDERD_OUTDIR/"
 REBUILT_PKG_PATH="$REBUILDERD_OUTDIR/$(basename "$BUILT_PKG")"
-
-echo ""
-echo "Synchronizing package with original structure and metadata..."
-
-# Disable trace mode for less verbose output during sync
-set +x
-
-# Use Python script to synchronize package structure and metadata
-# This preserves exact tar structure, compression, timestamps, permissions, etc.
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-SYNC_SCRIPT="$SCRIPT_DIR/sync-package.py"
-
-# Create temporary output file
-TEMP_OUTPUT=$(mktemp)
-
-# Run synchronization
-python3 "$SYNC_SCRIPT" "$INPUT_PKG" "$REBUILT_PKG_PATH" "$TEMP_OUTPUT"
-
-# Repack with bsdtar to match BSD tar header format
-echo "Repacking with bsdtar to match header format..."
-
-# Create temp directory for extraction
-REPACK_DIR=$(mktemp -d)
-
-# Decompress and extract
-zstd -d -c "$TEMP_OUTPUT" | bsdtar -xf - -C "$REPACK_DIR"
-
-# Repack and compress with zstd
-rm -f "$REBUILT_PKG_PATH"
-bsdtar -cf - -C "$REPACK_DIR" . | zstd -o "$REBUILT_PKG_PATH"
-
-# Clean up
-rm -rf "$REPACK_DIR" "$TEMP_OUTPUT"
-
-# Re-enable trace mode
-set -x
-
-echo "Package repacked with bsdtar."
-
-# Run diffoscope to compare packages
-echo ""
-echo "Running diffoscope to compare packages..."
-if command -v diffoscope >/dev/null 2>&1; then
-    diffoscope --text /tmp/diffoscope.txt "$INPUT_PKG" "$REBUILT_PKG_PATH" || true
-    if [ -f /tmp/diffoscope.txt ]; then
-        echo "=== Diffoscope output (first 100 lines) ==="
-        head -100 /tmp/diffoscope.txt
-        echo "=== Full output saved to /tmp/diffoscope.txt ==="
-        rm -f /tmp/diffoscope.txt
-    fi
-else
-    echo "diffoscope not installed, skipping comparison"
-fi
 
 echo ""
 echo "Build complete for '$ORIGIN'"

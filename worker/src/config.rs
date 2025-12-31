@@ -17,6 +17,8 @@ pub struct ConfigFile {
     pub backends: HashMap<String, Backend>,
     #[serde(default)]
     pub supported_architectures: Vec<String>,
+    /// Number of seconds to sleep when no work is available (default: 180)
+    pub idle_delay: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

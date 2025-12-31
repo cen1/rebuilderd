@@ -17,12 +17,17 @@
 # rebuilderd_worker_conf="/usr/local/etc/rebuilderd-worker.conf"
 # rebuilderd_worker_user="root"        # user to run as (needs root for rebuilder backends)
 # rebuilderd_worker_name="worker1"     # worker name (defaults to hostname)
+#
+# If FS gets corrupted:
+# mount -fur /
+# fsck -y /
+# reboot
 
 . /etc/rc.subr
 
 name="rebuilderd_worker"
 rcvar="${name}_enable"
-procname="/home/freebsd/rebuilderd/target/debug/rebuilderd-worker"
+procname="/usr/local/bin/rebuilderd-worker"
 
 load_rc_config $name
 
@@ -38,6 +43,7 @@ command="/usr/sbin/daemon"
 command_args="-f -o ${logfile} -p ${pidfile} -u ${rebuilderd_worker_user} ${procname} -c ${rebuilderd_worker_conf} -n ${rebuilderd_worker_name} connect"
 
 start_precmd="${name}_prestart"
+stop_cmd="${name}_stop"
 
 rebuilderd_worker_prestart()
 {
@@ -49,6 +55,45 @@ rebuilderd_worker_prestart()
 
     # Create pidfile directory if it doesn't exist
     install -d -o root -g wheel -m 0755 /var/run
+}
+
+rebuilderd_worker_stop()
+{
+    if [ ! -f "${pidfile}" ]; then
+        echo "${name} is not running"
+        return 0
+    fi
+
+    rc_pid=$(check_pidfile ${pidfile} ${procname})
+    if [ -z "${rc_pid}" ]; then
+        echo "${name} is not running (stale pidfile)"
+        rm -f ${pidfile}
+        return 0
+    fi
+
+    echo "Stopping ${name} (PID: ${rc_pid})"
+
+    # Send SIGTERM to the entire process group (negative PID)
+    # This kills the daemon and all its children
+    kill -- -${rc_pid} 2>/dev/null || kill ${rc_pid} 2>/dev/null
+
+    # Wait for process to exit (up to 30 seconds)
+    local timeout=30
+    local count=0
+    while kill -0 ${rc_pid} 2>/dev/null; do
+        if [ ${count} -ge ${timeout} ]; then
+            echo "Timeout waiting for ${name} to stop, sending SIGKILL"
+            kill -9 -- -${rc_pid} 2>/dev/null || kill -9 ${rc_pid} 2>/dev/null
+            sleep 1
+            break
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+
+    rm -f ${pidfile}
+    echo "${name} stopped"
+    return 0
 }
 
 run_rc_command "$@"
