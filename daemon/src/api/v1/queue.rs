@@ -396,16 +396,7 @@ pub async fn request_work(
 
     if let Some(record) =
         connection.transaction::<Option<QueuedJobWithArtifacts>, _, _>(|conn| {
-            // Check if there's already a FreeBSD job in progress (single-worker constraint)
-            let freebsd_in_progress = queue::table
-                .filter(queue::worker.is_not_null())
-                .inner_join(build_inputs::table.inner_join(source_packages::table))
-                .filter(source_packages::distribution.eq("freebsd"))
-                .count()
-                .get_result::<i64>(conn)
-                .map_err(Error::from)? > 0;
-
-            let mut query = queue_base()
+            let query = queue_base()
                 .filter(queue::worker.is_null())
                 .filter(
                     build_inputs::next_retry
@@ -415,11 +406,6 @@ pub async fn request_work(
                 .filter(build_inputs::architecture.eq_any(supported_architectures))
                 .filter(build_inputs::backend.eq_any(pop_request.supported_backends))
                 .into_boxed();
-
-            // If a FreeBSD job is in progress, skip all FreeBSD jobs
-            if freebsd_in_progress {
-                query = query.filter(source_packages::distribution.ne("freebsd"));
-            }
 
             if let Some(record) = query
                 .order_by((

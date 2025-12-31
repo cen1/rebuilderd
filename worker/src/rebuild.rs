@@ -190,6 +190,16 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
                 &mut diff_log,
             ).await?;
 
+            // Append differ script output to main build log
+            if !diff_log.is_empty() {
+                if !log.is_empty() {
+                    log.extend(b"\n\n");
+                }
+                log.extend(b"=== Differ Script Output ===\n");
+                log.extend(&diff_log);
+                log.extend(b"\n============================\n");
+            }
+
             if artifacts_identical {
                 info!(
                     "Custom diff script verified artifact as GOOD: {:?}",
