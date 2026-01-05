@@ -111,12 +111,14 @@ fi
 # Auto jail and ports tree setup
 # Use worker name from environment, fallback to hostname if not set
 WORKER_NAME="${REBUILDERD_WORKER_NAME:-$(hostname -s)}"
+# Sanitize worker name by replacing dashes with underscores (poudriere doesn't allow dashes in ports tree names)
+WORKER_NAME_SAFE=$(echo "$WORKER_NAME" | tr '-' '_')
 # Allow JAIL and PORTS_TREE to be overridden via environment
 if [ -z "$JAIL" ]; then
-  JAIL="rebuilderd-${WORKER_NAME}-${FREEBSD_MAJOR}-${PKG_ARCH}"
+  JAIL="rebuilderd-${WORKER_NAME_SAFE}-${FREEBSD_MAJOR}-${PKG_ARCH}"
 fi
 if [ -z "$PORTS_TREE" ]; then
-  PORTS_TREE="worker${WORKER_NAME}"
+  PORTS_TREE="worker${WORKER_NAME_SAFE}"
 fi
 
 echo "Using jail: $JAIL (FreeBSD $FREEBSD_RELEASE)"
