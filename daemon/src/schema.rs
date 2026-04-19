@@ -80,6 +80,29 @@ diesel::table! {
 }
 
 diesel::table! {
+    stats_categories (id) {
+        id -> Integer,
+        stats_id -> Integer,
+        category -> Text,
+        count -> Integer,
+    }
+}
+
+diesel::table! {
+    stats (id) {
+        id -> Integer,
+        captured_at -> Timestamp,
+        distribution -> Nullable<Text>,
+        release -> Nullable<Text>,
+        architecture -> Nullable<Text>,
+        good -> Integer,
+        bad -> Integer,
+        fail -> Integer,
+        unknown -> Integer,
+    }
+}
+
+diesel::table! {
     source_packages (id) {
         id -> Integer,
         name -> Text,
@@ -116,6 +139,7 @@ diesel::joinable!(rebuild_artifacts -> diffoscope_logs (diffoscope_log_id));
 diesel::joinable!(rebuild_artifacts -> rebuilds (rebuild_id));
 diesel::joinable!(rebuilds -> build_inputs (build_input_id));
 diesel::joinable!(rebuilds -> build_logs (build_log_id));
+diesel::joinable!(stats_categories -> stats (stats_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     attestation_logs,
@@ -127,5 +151,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     rebuild_artifacts,
     rebuilds,
     source_packages,
+    stats,
+    stats_categories,
     workers,
 );
