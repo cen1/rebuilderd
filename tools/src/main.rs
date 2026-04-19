@@ -116,6 +116,7 @@ async fn lookup_package(client: &Client, filter: PkgsFilter) -> Result<BinaryPac
         name_starts_with: None,
         version: None, // TODO: ls.filter.version
         source_name: None,
+        ..Default::default()
     };
 
     let mut results = client
@@ -236,6 +237,7 @@ async fn main() -> Result<()> {
                 name_starts_with: None,
                 version: None, // TODO: ls.filter.version
                 source_name: None,
+                ..Default::default()
             };
 
             let mut page = Page {
@@ -446,6 +448,7 @@ async fn main() -> Result<()> {
                 name: Some(push.name),
                 name_starts_with: None,
                 version: push.version,
+                ..Default::default()
             };
 
             let dropped = client

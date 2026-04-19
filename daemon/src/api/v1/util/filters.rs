@@ -5,10 +5,12 @@ use diesel::expression::{AsExpression, ValidGrouping};
 use diesel::query_builder::QueryFragment;
 use diesel::sql_types::{Bool, Text};
 use diesel::sqlite::Sqlite;
-use diesel::{BoolExpressionMethods, BoxableExpression, Expression, SelectableExpression};
-use diesel::{ExpressionMethods, SqliteExpressionMethods, TextExpressionMethods};
+use diesel::{
+    BoolExpressionMethods, BoxableExpression, Expression, ExpressionMethods, SelectableExpression,
+    SqliteExpressionMethods, TextExpressionMethods,
+};
 use rebuilderd_common::api::v1::{
-    BinaryIdentityFilter, FreshnessFilter, OriginFilter, SourceIdentityFilter,
+    BinaryIdentityFilter, FreshnessFilter, OriginFilter, SearchType, SourceIdentityFilter,
 };
 
 pub trait IntoSourceIdentityFilter<QS, DB>
@@ -67,22 +69,14 @@ impl<T: 'static> IntoSourceIdentityFilter<T, Sqlite> for SourceIdentityFilter {
             + Send
             + 'static,
     {
-        // If both name and name_starts_with are set, name takes precedence
-        let name_is: Self::Output = match (self.name, self.name_starts_with) {
-            (Some(name), _) => {
-                // Substring match for name (case-insensitive search)
-                // Use %pattern% to match anywhere in the name
-                let lower_pattern = format!("%{}%", name.to_lowercase());
-                Box::new(name_column.like(lower_pattern))
+        let name_is: Self::Output = if let Some(name) = self.name {
+            match self.search_type {
+                SearchType::Exact => Box::new(name_column.eq(name)),
+                SearchType::Contains => Box::new(name_column.like(format!("%{name}%"))),
+                SearchType::StartsWith => Box::new(name_column.like(format!("{name}%"))),
             }
-            (None, Some(prefix)) => {
-                // LIKE pattern for name_starts_with
-                // In SQLite, LIKE is case-insensitive for ASCII by default, but
-                // package names might start with lowercase, so we match both
-                let lower_pattern = format!("{}%", prefix.to_lowercase());
-                Box::new(name_column.like(lower_pattern))
-            }
-            (None, None) => Box::new(AsExpression::<Bool>::as_expression(true)),
+        } else {
+            Box::new(AsExpression::<Bool>::as_expression(true))
         };
 
         let version_is: Self::Output = match self.version {
@@ -165,9 +159,14 @@ impl<T: 'static> IntoBinaryIdentityFilter<T, Sqlite> for BinaryIdentityFilter {
             + Send
             + 'static,
     {
-        let name_is: Self::Output = match self.name {
-            Some(name) => Box::new(name_column.is(name)),
-            None => Box::new(AsExpression::<Bool>::as_expression(true)),
+        let name_is: Self::Output = if let Some(name) = self.name {
+            match self.search_type {
+                SearchType::Exact => Box::new(name_column.eq(name)),
+                SearchType::Contains => Box::new(name_column.like(format!("%{name}%"))),
+                SearchType::StartsWith => Box::new(name_column.like(format!("{name}%"))),
+            }
+        } else {
+            Box::new(AsExpression::<Bool>::as_expression(true))
         };
 
         let version_is: Self::Output = match self.version {

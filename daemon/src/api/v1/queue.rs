@@ -125,6 +125,7 @@ pub async fn request_rebuild(
         name: queue_request.name,
         name_starts_with: None,
         version: queue_request.version,
+        ..Default::default()
     };
 
     let mut sql = source_packages::table

@@ -39,6 +39,7 @@ paths:
         - $ref: '#/components/parameters/component'
 
         - $ref: '#/components/parameters/name'
+        - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/architecture'
       responses:
@@ -271,6 +272,7 @@ paths:
         - $ref: '#/components/parameters/component'
 
         - $ref: '#/components/parameters/name'
+        - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/status'
       responses:
@@ -330,6 +332,8 @@ paths:
         - $ref: '#/components/parameters/component'
 
         - $ref: '#/components/parameters/name'
+        - $ref: '#/components/parameters/source_name'
+        - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/architecture'
       responses:
@@ -389,6 +393,7 @@ paths:
         - $ref: '#/components/parameters/component'
 
         - $ref: '#/components/parameters/name'
+        - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/architecture'
       responses:
@@ -438,6 +443,7 @@ paths:
         - $ref: '#/components/parameters/component'
 
         - $ref: '#/components/parameters/name'
+        - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/architecture'
       responses:
@@ -1478,6 +1484,22 @@ components:
         type: string
       description: |-
         Filters the results by the version of the package.
+    search_type:
+      in: query
+      name: search_type
+      required: false
+      schema:
+        type: string
+        enum:
+          - exact
+          - contains
+          - starts_with
+        default: exact
+      description: |-
+        Specifies the matching strategy for the 'name' parameter.
+        - `exact`: Matches the name exactly (default).
+        - `contains`: Matches if the name contains the provided string.
+        - `starts_with`: Matches if the name starts with the provided string.
     distribution:
       in: query
       name: distribution
