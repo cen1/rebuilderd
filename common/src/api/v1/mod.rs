@@ -176,6 +176,7 @@ pub trait QueueRestApi {
         page: Option<&Page>,
         origin_filter: Option<&OriginFilter>,
         source_identity_filter: Option<&SourceIdentityFilter>,
+        queue_filter: Option<&QueueFilter>,
     ) -> Result<ResultPage<QueuedJob>>;
 
     async fn request_rebuild(&self, request: QueueJobRequest) -> Result<()>;
@@ -533,12 +534,14 @@ impl QueueRestApi for Client {
         page: Option<&Page>,
         origin_filter: Option<&OriginFilter>,
         source_identity_filter: Option<&SourceIdentityFilter>,
+        queue_filter: Option<&QueueFilter>,
     ) -> Result<ResultPage<QueuedJob>> {
         let records = self
             .get(Cow::Borrowed("api/v1/queue"))
             .query(&page)
             .query(&origin_filter)
             .query(&source_identity_filter)
+            .query(&queue_filter)
             .send()
             .await?
             .error_for_status()?

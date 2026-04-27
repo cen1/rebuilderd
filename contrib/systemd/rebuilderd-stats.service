@@ -4,3 +4,6 @@ Description=rebuilderctl stats: collect a daily snapshot
 [Service]
 User=rebuilderd
 ExecStart=/usr/bin/rebuildctl stats collect
+
+[Install]
+WantedBy=multi-user.target

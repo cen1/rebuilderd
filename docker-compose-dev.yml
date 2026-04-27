@@ -11,26 +11,6 @@ services:
     - RUST_LOG=debug
     volumes:
     - ./secret:/secret
-    - ./data:/data
-    - ./rebuilderd.conf:/config/rebuilderd.conf:ro
-  # worker-archlinux:
-  #   build:
-  #     context: .
-  #     dockerfile: worker/Dockerfile.archlinux
-  #   scale: 1
-  #   init: true
-  #   privileged: true
-  #   command: ['rebuilderd-worker', 'connect', 'http://daemon:8484']
-  #   environment:
-  #   - REBUILDERD_COOKIE_PATH=/secret/auth
-  #   - RUST_LOG=debug
-  #   volumes:
-  #   - ./secret:/secret
-  #   - /dev/urandom:/dev/urandom:ro
-  #   - /dev/random:/dev/random:ro
-  #   - /sys/fs/cgroup:/sys/fs/cgroup:rw
-  #   tmpfs:
-  #   - /run
-  #   - /run/lock
-  #   depends_on:
-  #     - daemon
+    - ./data2:/data
+    - ./data2/rebuilderd.conf:/config/rebuilderd.conf:ro
+    - ./data2/rebuilderd-stats.conf:/etc/rebuilderd-stats.conf:ro

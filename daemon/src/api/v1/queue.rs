@@ -5,19 +5,21 @@ use crate::api::v1::util::pagination::PaginateDsl;
 use crate::config::Config;
 use crate::db::Pool;
 use crate::models::NewQueued;
-use crate::schema::{binary_packages, build_inputs, queue, rebuilds, source_packages, workers};
+use crate::schema::{binary_packages, build_inputs, queue, rebuild_artifacts, rebuilds, source_packages, workers};
 use crate::web;
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, post};
 use chrono::{Duration, NaiveDateTime, Utc};
-use diesel::dsl::update;
+use diesel::dsl::{exists, max, not, update};
 use diesel::{BoolExpressionMethods, JoinOnDsl};
 use diesel::{Connection, OptionalExtension, QueryDsl, RunQueryDsl};
-use diesel::{ExpressionMethods, SqliteExpressionMethods, define_sql_function};
+use diesel::{ExpressionMethods, NullableExpressionMethods, SqliteExpressionMethods, define_sql_function};
 use rebuilderd_common::api::v1::{
-    BuildStatus, JobAssignment, OriginFilter, Page, PopQueuedJobRequest, Priority, QueueJobRequest,
-    QueuedJob, QueuedJobArtifact, QueuedJobWithArtifacts, ResultPage, SourceIdentityFilter,
+    BuildStatus, JobAssignment, OriginFilter, Page, PopQueuedJobRequest, Priority, QueueFilter,
+    QueueJobRequest, QueuedJob, QueuedJobArtifact, QueuedJobWithArtifacts, ResultPage,
+    SourceIdentityFilter,
 };
 use rebuilderd_common::config::PING_DEADLINE;
+use log::debug;
 use rebuilderd_common::errors::Error;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -54,22 +56,30 @@ pub async fn get_queued_jobs(
     page: web::Query<Page>,
     origin_filter: web::Query<OriginFilter>,
     source_identity_filter: web::Query<SourceIdentityFilter>,
+    queue_filter: web::Query<QueueFilter>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
 
-    let records = queue_base()
-        .filter(
-            origin_filter
-                .clone()
-                .into_inner()
-                .into_filter(build_inputs::architecture),
-        )
-        .filter(
-            source_identity_filter
-                .clone()
-                .into_inner()
-                .into_filter(source_packages::name, source_packages::version),
-        )
+    let origin = origin_filter.into_inner();
+    let identity = source_identity_filter.into_inner();
+    let only_started = queue_filter.started == Some(true);
+
+    let mut records_sql = queue_base()
+        .filter(origin.clone().into_filter(build_inputs::architecture))
+        .filter(identity.clone().into_filter(source_packages::name, source_packages::version))
+        .into_boxed();
+
+    let mut count_sql = queue_base()
+        .filter(origin.into_filter(build_inputs::architecture))
+        .filter(identity.into_filter(source_packages::name, source_packages::version))
+        .into_boxed();
+
+    if only_started {
+        records_sql = records_sql.filter(queue::started_at.is_not_null());
+        count_sql = count_sql.filter(queue::started_at.is_not_null());
+    }
+
+    let records = records_sql
         .order_by((
             queue::priority,
             diesel::dsl::date(queue::queued_at),
@@ -79,19 +89,7 @@ pub async fn get_queued_jobs(
         .load::<QueuedJob>(connection.as_mut())
         .map_err(Error::from)?;
 
-    let total = queue_base()
-        .filter(
-            origin_filter
-                .clone()
-                .into_inner()
-                .into_filter(build_inputs::architecture),
-        )
-        .filter(
-            source_identity_filter
-                .clone()
-                .into_inner()
-                .into_filter(source_packages::name, source_packages::version),
-        )
+    let total = count_sql
         .count()
         .get_result::<i64>(connection.as_mut())
         .map_err(Error::from)?;
@@ -123,14 +121,14 @@ pub async fn request_rebuild(
 
     let source_identity_filter = SourceIdentityFilter {
         name: queue_request.name,
-        name_starts_with: None,
         version: queue_request.version,
         ..Default::default()
     };
 
     let mut sql = source_packages::table
-        .inner_join(build_inputs::table.left_join(rebuilds::table))
+        .inner_join(build_inputs::table)
         .inner_join(binary_packages::table)
+        .filter(source_packages::seen_in_last_sync.is(true))
         .filter(
             origin_filter
                 .clone()
@@ -145,10 +143,41 @@ pub async fn request_rebuild(
         .into_boxed();
 
     if let Some(status) = queue_request.status {
+        // Use EXISTS subqueries restricted to the latest rebuild (max id) per build_input,
+        // so historical BAD/GOOD rows don't bleed through to the current status check.
+        // We alias rebuilds in the inner subquery so Diesel can distinguish the two usages.
+        diesel::alias!(crate::schema::rebuilds as r_max: RMaxAlias);
+
         if status == BuildStatus::Unknown {
-            sql = sql.filter(rebuilds::status.is_null());
+            // UNKWN: no rebuilds exist, or the latest rebuild has status = NULL.
+            sql = sql.filter(not(exists(
+                rebuilds::table
+                    .filter(rebuilds::build_input_id.eq(build_inputs::id))
+                    .filter(
+                        rebuilds::id.nullable().eq(
+                            r_max
+                                .filter(r_max.field(rebuilds::build_input_id).eq(build_inputs::id))
+                                .select(max(r_max.field(rebuilds::id)))
+                                .single_value(),
+                        ),
+                    )
+                    .filter(rebuilds::status.is_not_null()),
+            )));
         } else {
-            sql = sql.filter(rebuilds::status.is(status));
+            // BAD / GOOD / FAIL: the latest rebuild has exactly this status.
+            sql = sql.filter(exists(
+                rebuilds::table
+                    .filter(rebuilds::build_input_id.eq(build_inputs::id))
+                    .filter(
+                        rebuilds::id.nullable().eq(
+                            r_max
+                                .filter(r_max.field(rebuilds::build_input_id).eq(build_inputs::id))
+                                .select(max(r_max.field(rebuilds::id)))
+                                .single_value(),
+                        ),
+                    )
+                    .filter(rebuilds::status.is(status)),
+            ));
         }
     }
 
@@ -158,6 +187,33 @@ pub async fn request_rebuild(
 
     let now = Utc::now();
     for (build_input_id, _) in build_inputs {
+        // Reset the latest rebuild's status (and its artifacts) to NULL so the
+        // package immediately appears as UNKWN rather than retaining the old result.
+        if queue_request.reset {
+            let latest_rebuild_id = rebuilds::table
+                .filter(rebuilds::build_input_id.eq(build_input_id))
+                .order(rebuilds::id.desc())
+                .select(rebuilds::id)
+                .first::<i32>(connection.as_mut())
+                .optional()
+                .map_err(Error::from)?;
+
+            if let Some(rebuild_id) = latest_rebuild_id {
+                diesel::update(rebuilds::table.filter(rebuilds::id.eq(rebuild_id)))
+                    .set(rebuilds::status.eq(None::<String>))
+                    .execute(connection.as_mut())
+                    .map_err(Error::from)?;
+
+                diesel::update(
+                    rebuild_artifacts::table
+                        .filter(rebuild_artifacts::rebuild_id.eq(rebuild_id)),
+                )
+                .set(rebuild_artifacts::status.eq(None::<String>))
+                .execute(connection.as_mut())
+                .map_err(Error::from)?;
+            }
+        }
+
         let next_retry = (now - Duration::minutes(1)).naive_utc();
         let priority = queue_request.priority.unwrap_or(Priority::manual());
         if has_queued_friend(connection.as_mut(), build_input_id)? {

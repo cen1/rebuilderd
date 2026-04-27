@@ -64,10 +64,11 @@ if [ "$ORIGINAL_HASH" = "$REBUILT_HASH" ]; then
     exit 0
 fi
 
-echo "Hashes differ, checking with diffoscope for content-level differences..."
+echo "Hashes differ, checking for content-level differences..."
 echo ""
 
-# Run diffoscope to analyze differences
+# Run diffoscope with --json to determine if differences are metadata-only
+# (e.g. tar headers with build timestamps differ, but file contents are identical)
 DIFFOSCOPE_JSON=$(mktemp)
 if ! diffoscope --json "$DIFFOSCOPE_JSON" \
     --exclude-directory-metadata=recursive \
@@ -86,15 +87,7 @@ if jq -e '.details[]?.comments[]? | select(contains("no file-specific difference
     exit 0
 fi
 
-# There are actual content differences - show them
+# There are actual content differences
 echo "✗ CONTENT DIFFERS: Actual differences found between packages"
-echo ""
-echo "=== Diffoscope Output ==="
-diffoscope --exclude-directory-metadata=recursive \
-    --exclude '*+MANIFEST' \
-    --exclude '*+COMPACT_MANIFEST' \
-    "$ORIGINAL_PKG" "$REBUILT_PKG" 2>&1 || true
-echo "========================="
-
 rm -f "$DIFFOSCOPE_JSON"
 exit 1

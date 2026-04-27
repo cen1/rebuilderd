@@ -9,3 +9,4 @@ rebuilder.v2.key
 /secret/
 *.sw[op]
 .idea/
+data*

@@ -1,7 +1,7 @@
 use clap::{ArgAction, CommandFactory, Parser};
 use clap_complete::Shell;
 use glob::Pattern;
-use rebuilderd_common::api::v1::ArtifactStatus;
+use rebuilderd_common::api::v1::{ArtifactStatus, BuildStatus};
 use rebuilderd_common::errors::*;
 use std::io;
 use std::path::PathBuf;
@@ -71,6 +71,8 @@ pub enum Pkgs {
     Sync(PkgsSync),
     /// List known packages
     Ls(PkgsList),
+    /// Re-queue non-good packages for rebuild
+    Requeue(PkgsRequeue),
     /// Sync package index with profile
     SyncProfile(PkgsSyncProfile),
     /// Read a package sync from stdin
@@ -158,14 +160,30 @@ pub struct PkgsList {
 
 #[derive(Debug, Parser)]
 pub struct PkgsRequeue {
-    #[command(flatten)]
-    pub filter: PkgsFilter,
+    /// Filter packages matching this name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Filter packages matching this status (GOOD, BAD, FAIL, UNKWN)
+    #[arg(long)]
+    pub status: Option<BuildStatus>,
+    /// Filter packages matching this distro
+    #[arg(long)]
+    pub distro: Option<String>,
+    /// Filter packages matching this suite
+    #[arg(long)]
+    pub suite: Option<String>,
+    /// Filter packages matching this architecture
+    #[arg(long)]
+    pub architecture: Option<String>,
     /// Requeue with given priority
     #[arg(long, default_value = "0")]
     pub priority: i32,
-    /// Reset the status back to UNKWN
+    /// Reset the current status to UNKWN so the package appears as pending
     #[arg(long)]
     pub reset: bool,
+    /// Drop all existing queue entries matching the filter before requeueing
+    #[arg(long)]
+    pub clear_queue: bool,
 }
 
 #[derive(Debug, Parser)]

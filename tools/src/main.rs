@@ -9,9 +9,9 @@ use glob::Pattern;
 use nom::AsBytes;
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::{
-    ArtifactStatus, BinaryIdentityFilter, BinaryPackage, BuildRestApi, OriginFilter, PackageReport,
-    PackageRestApi, Page, Priority, QueueJobRequest, QueueRestApi, SourceIdentityFilter,
-    StatsCollectRequest, StatsRestApi, WorkerRestApi,
+    ArtifactStatus, BinaryIdentityFilter, BinaryPackage, BuildRestApi, BuildStatus, OriginFilter,
+    PackageReport, PackageRestApi, Page, Priority, QueueJobRequest, QueueRestApi,
+    SourceIdentityFilter, StatsCollectRequest, StatsRestApi, WorkerRestApi,
 };
 use rebuilderd_common::errors::*;
 use rebuilderd_common::http;
@@ -113,7 +113,6 @@ async fn lookup_package(client: &Client, filter: PkgsFilter) -> Result<BinaryPac
 
     let binary_identity_filter = BinaryIdentityFilter {
         name: filter.name,
-        name_starts_with: None,
         version: None, // TODO: ls.filter.version
         source_name: None,
         ..Default::default()
@@ -165,6 +164,51 @@ async fn main() -> Result<()> {
                 if writeln!(stdout, "{:-40} => {}", label, status).is_err() {
                     break;
                 }
+            }
+        }
+        SubCommand::Pkgs(Pkgs::Requeue(args)) => {
+            let client = client.with_auth_cookie()?;
+            let priority = Some(Priority::from(args.priority));
+
+            if args.clear_queue {
+                let origin_filter = OriginFilter {
+                    distribution: args.distro.clone(),
+                    release: None,
+                    component: args.suite.clone(),
+                    architecture: args.architecture.clone(),
+                };
+                let source_identity_filter = SourceIdentityFilter {
+                    name: args.name.clone(),
+                    version: None,
+                    ..Default::default()
+                };
+                client
+                    .drop_queued_jobs(Some(&origin_filter), Some(&source_identity_filter))
+                    .await?;
+            }
+
+            // If a specific status is requested, queue only that status.
+            // Otherwise default to all non-good statuses: BAD, FAIL, and UNKWN.
+            let statuses: Vec<BuildStatus> = if let Some(status) = args.status {
+                vec![status]
+            } else {
+                vec![BuildStatus::Bad, BuildStatus::Fail, BuildStatus::Unknown]
+            };
+
+            for status in statuses {
+                client
+                    .request_rebuild(QueueJobRequest {
+                        distribution: args.distro.clone(),
+                        release: None,
+                        component: args.suite.clone(),
+                        name: args.name.clone(),
+                        version: None,
+                        architecture: args.architecture.clone(),
+                        status: Some(status),
+                        priority,
+                        reset: args.reset,
+                    })
+                    .await?;
             }
         }
         SubCommand::Pkgs(Pkgs::Sync(args)) => sync(client.with_auth_cookie()?, args).await?,
@@ -234,7 +278,6 @@ async fn main() -> Result<()> {
 
             let binary_identity_filter = BinaryIdentityFilter {
                 name: ls.filter.name,
-                name_starts_with: None,
                 version: None, // TODO: ls.filter.version
                 source_name: None,
                 ..Default::default()
@@ -363,7 +406,7 @@ async fn main() -> Result<()> {
 
             let mut output_lines_limit = if ls.head { 25 } else { usize::MAX };
             while output_lines_limit > 0 {
-                let mut results = client.get_queued_jobs(Some(&page), None, None).await?;
+                let mut results = client.get_queued_jobs(Some(&page), None, None, None).await?;
                 if let Some(last) = results.records.last() {
                     page.after = Some(last.id);
                 } else {
@@ -433,6 +476,7 @@ async fn main() -> Result<()> {
                     architecture: push.architecture,
                     status: None, // TODO: push.status
                     priority: Some(Priority::from(push.priority)),
+                    reset: false,
                 })
                 .await?;
         }
@@ -445,8 +489,7 @@ async fn main() -> Result<()> {
             };
 
             let source_identity_filter = SourceIdentityFilter {
-                name: Some(push.name),
-                name_starts_with: None,
+                name: push.name,
                 version: push.version,
                 ..Default::default()
             };

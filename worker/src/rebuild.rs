@@ -260,11 +260,17 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
                     status: ArtifactStatus::Bad,
                 };
 
-                // Use the diff script output as diffoscope output
-                let encoded_diffoscope = zstd_compress(&diff_log)
-                    .await
-                    .map_err(Error::from)?;
-                res.diffoscope = Some(encoded_diffoscope);
+                // Generate diffoscope diff if enabled
+                if ctx.diffoscope.enabled {
+                    let diff = diffoscope(&artifact_path, &output_path, &ctx.diffoscope)
+                        .await
+                        .context("Failed to run diffoscope")?;
+
+                    let encoded_diffoscope =
+                        zstd_compress(diff.as_bytes()).await.map_err(Error::from)?;
+
+                    res.diffoscope = Some(encoded_diffoscope);
+                }
 
                 res
             }

@@ -4,6 +4,13 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::Queryable;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct QueueFilter {
+    /// If true, only return jobs that have been picked up by a worker (started_at is set).
+    /// If false or omitted, return all queued jobs.
+    pub started: Option<bool>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueJobRequest {
     pub distribution: Option<String>,
@@ -14,6 +21,10 @@ pub struct QueueJobRequest {
     pub architecture: Option<String>,
     pub status: Option<BuildStatus>,
     pub priority: Option<Priority>,
+    /// Reset the current build status to UNKWN immediately so the package
+    /// appears as pending rather than retaining the old FAIL/BAD result.
+    #[serde(default)]
+    pub reset: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

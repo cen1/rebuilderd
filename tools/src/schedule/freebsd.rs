@@ -235,7 +235,7 @@ pub async fn sync(http: &http::Client, sync: &PkgsSync) -> Result<Vec<PackageRep
             // Fall back to approximation for any commits we couldn't fetch from GitHub
             // Use the earliest build timestamp for each git hash
             for info in &package_infos {
-                if let (Some(ref git_hash), Some(build_ts)) = (&info.git_hash, info.build_timestamp) {
+                if let (Some(git_hash), Some(build_ts)) = (&info.git_hash, info.build_timestamp) {
                     commit_timestamps.entry(git_hash.clone())
                         .and_modify(|ts| {
                             // Only update if this build timestamp is earlier (shouldn't happen with GitHub data)
