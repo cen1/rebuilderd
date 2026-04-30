@@ -104,7 +104,8 @@ fn binary_packages_base() -> _ {
             rebuild_artifacts::diffoscope_log_id.nullable(),
             rebuild_artifacts::attestation_log_id.nullable(),
             source_packages::last_seen,
-            source_packages::seen_in_last_sync,
+            binary_packages::seen_in_last_sync,
+            r1.field(rebuilds::status).assume_not_null().nullable(),
         ))
 }
 
@@ -117,7 +118,24 @@ fn mark_scoped_packages_unseen(
     connection: &mut SqliteConnection,
     report: &PackageReport,
 ) -> Result<(), Error> {
-    // mark all packages potentially affected by this report as unseen
+    // build the scoped build_input ids subquery (reused for both updates)
+    let scoped_build_input_ids = build_inputs::table
+        .inner_join(
+            sp.on(sp
+                .field(source_packages::id)
+                .is(build_inputs::source_package_id)),
+        )
+        .filter(
+            sp.field(source_packages::distribution)
+                .is(&report.distribution),
+        )
+        .filter(sp.field(source_packages::release).is(&report.release))
+        .filter(sp.field(source_packages::component).is(&report.component))
+        .filter(build_inputs::architecture.is(&report.architecture))
+        .group_by(build_inputs::id)
+        .select(build_inputs::id);
+
+    // mark all source packages potentially affected by this report as unseen
     update(source_packages::table)
         .filter(
             source_packages::id.eq_any(
@@ -139,6 +157,13 @@ fn mark_scoped_packages_unseen(
             ),
         )
         .set(source_packages::seen_in_last_sync.eq(false))
+        .execute(connection)
+        .map_err(Error::from)?;
+
+    // mark all binary packages potentially affected by this report as unseen
+    update(binary_packages::table)
+        .filter(binary_packages::build_input_id.eq_any(scoped_build_input_ids))
+        .set(binary_packages::seen_in_last_sync.eq(false))
         .execute(connection)
         .map_err(Error::from)?;
 
@@ -242,6 +267,7 @@ pub async fn submit_package_report(
                     version: artifact_report.version.clone(),
                     architecture: report.architecture.clone(),
                     artifact_url: artifact_report.url.clone(),
+                    seen_in_last_sync: true,
                 };
 
                 new_binary_package.upsert(conn.as_mut())?;
@@ -573,6 +599,7 @@ pub async fn get_binary_packages(
     status_filter: web::Query<StatusFilter>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
+    let seen_only = freshness_filter.into_inner().seen_only.unwrap_or(true);
 
     let mut query = binary_packages_base()
         .filter(
@@ -586,7 +613,7 @@ pub async fn get_binary_packages(
             binary_packages::version,
             source_packages::name,
         ))
-        .filter(freshness_filter.clone().into_inner().into_filter())
+        .filter(binary_packages::seen_in_last_sync.is(seen_only))
         .into_boxed();
 
     // Apply status filter if provided
@@ -594,45 +621,68 @@ pub async fn get_binary_packages(
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
 
-            // Check if UNKWN is requested (packages that haven't been built have NULL status)
+            // For binary packages, status semantics differ by level:
+            // - UNKWN: no rebuild has been attempted yet (r1 left join produces NULL row)
+            // - FAIL: build ran but failed before producing artifacts (rebuilds.status = FAIL,
+            //         no artifact rows → rebuild_artifacts.status is NULL for these)
+            // - GOOD/BAD: stored per-artifact in rebuild_artifacts.status
             let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
-            let other_statuses: Vec<String> = status_values
+            let has_fail = status_values.iter().any(|s| s == "FAIL");
+            let artifact_statuses: Vec<String> = status_values
                 .iter()
-                .filter(|s| *s != "UNKWN")
+                .filter(|s| *s != "UNKWN" && *s != "FAIL")
                 .cloned()
                 .collect();
+            let has_artifacts = !artifact_statuses.is_empty();
 
-            if has_unkwn && !other_statuses.is_empty() {
-                // Filter for both NULL (UNKWN) and other specific statuses
-                query = query.filter(
-                    rebuild_artifacts::status.is_null().or(
-                        rebuild_artifacts::status.is_not_null().and(
-                            rebuild_artifacts::status
-                                .assume_not_null()
-                                .eq_any(other_statuses),
-                        ),
-                    ),
-                );
-            } else if has_unkwn {
-                // Only UNKWN requested - filter for NULL status
-                query = query.filter(rebuild_artifacts::status.is_null());
-            } else {
-                // Only other statuses requested
-                query = query.filter(
+            match (has_unkwn, has_fail, has_artifacts) {
+                (true, true, true) => query = query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(r1.field(rebuilds::status).is(BuildStatus::Fail))
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (true, true, false) => query = query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(r1.field(rebuilds::status).is(BuildStatus::Fail)),
+                ),
+                (true, false, true) => query = query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (true, false, false) => query = query.filter(r1.field(rebuilds::id).is_null()),
+                (false, true, true) => query = query.filter(
+                    r1.field(rebuilds::status).is(BuildStatus::Fail)
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (false, true, false) => query = query.filter(r1.field(rebuilds::status).is(BuildStatus::Fail)),
+                (false, false, true) => query = query.filter(
                     rebuild_artifacts::status.is_not_null().and(
-                        rebuild_artifacts::status
-                            .assume_not_null()
-                            .eq_any(other_statuses),
+                        rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                     ),
-                );
+                ),
+                (false, false, false) => {}
             }
         }
     }
 
-    let records = query
+    let mut records = query
         .paginate(page.into_inner())
         .load::<rebuilderd_common::api::v1::BinaryPackage>(connection.as_mut())
         .map_err(Error::from)?;
+
+    // Coalesce: for packages with no artifact-level status (FAIL builds produce no
+    // artifacts), surface the build-level status so consumers see FAIL instead of null.
+    for record in &mut records {
+        if record.status.is_none() {
+            record.status = record.rebuild_status.take();
+        }
+    }
 
     let mut count_query = binary_packages_base()
         .filter(
@@ -641,7 +691,7 @@ pub async fn get_binary_packages(
                 .into_inner()
                 .into_filter(binary_packages::architecture),
         )
-        .filter(freshness_filter.into_inner().into_filter())
+        .filter(binary_packages::seen_in_last_sync.is(seen_only))
         .filter(binary_identity_filter.clone().into_inner().into_filter(
             binary_packages::name,
             binary_packages::version,
@@ -654,37 +704,47 @@ pub async fn get_binary_packages(
         if !statuses.is_empty() {
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
 
-            // Check if UNKWN is requested (packages that haven't been built have NULL status)
             let has_unkwn = status_values.iter().any(|s| s == "UNKWN");
-            let other_statuses: Vec<String> = status_values
+            let has_fail = status_values.iter().any(|s| s == "FAIL");
+            let artifact_statuses: Vec<String> = status_values
                 .iter()
-                .filter(|s| *s != "UNKWN")
+                .filter(|s| *s != "UNKWN" && *s != "FAIL")
                 .cloned()
                 .collect();
+            let has_artifacts = !artifact_statuses.is_empty();
 
-            if has_unkwn && !other_statuses.is_empty() {
-                // Filter for both NULL (UNKWN) and other specific statuses
-                count_query = count_query.filter(
-                    rebuild_artifacts::status.is_null().or(
-                        rebuild_artifacts::status.is_not_null().and(
-                            rebuild_artifacts::status
-                                .assume_not_null()
-                                .eq_any(other_statuses),
-                        ),
-                    ),
-                );
-            } else if has_unkwn {
-                // Only UNKWN requested - filter for NULL status
-                count_query = count_query.filter(rebuild_artifacts::status.is_null());
-            } else {
-                // Only other statuses requested
-                count_query = count_query.filter(
+            match (has_unkwn, has_fail, has_artifacts) {
+                (true, true, true) => count_query = count_query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(r1.field(rebuilds::status).is(BuildStatus::Fail))
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (true, true, false) => count_query = count_query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(r1.field(rebuilds::status).is(BuildStatus::Fail)),
+                ),
+                (true, false, true) => count_query = count_query.filter(
+                    r1.field(rebuilds::id).is_null()
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (true, false, false) => count_query = count_query.filter(r1.field(rebuilds::id).is_null()),
+                (false, true, true) => count_query = count_query.filter(
+                    r1.field(rebuilds::status).is(BuildStatus::Fail)
+                        .or(rebuild_artifacts::status.is_not_null().and(
+                            rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
+                        )),
+                ),
+                (false, true, false) => count_query = count_query.filter(r1.field(rebuilds::status).is(BuildStatus::Fail)),
+                (false, false, true) => count_query = count_query.filter(
                     rebuild_artifacts::status.is_not_null().and(
-                        rebuild_artifacts::status
-                            .assume_not_null()
-                            .eq_any(other_statuses),
+                        rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                     ),
-                );
+                ),
+                (false, false, false) => {}
             }
         }
     }
@@ -704,12 +764,15 @@ pub async fn get_binary_package(
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
 
-    if let Some(record) = binary_packages_base()
+    if let Some(mut record) = binary_packages_base()
         .filter(binary_packages::id.is(id.into_inner()))
         .get_result::<rebuilderd_common::api::v1::BinaryPackage>(connection.as_mut())
         .optional()
         .map_err(Error::from)?
     {
+        if record.status.is_none() {
+            record.status = record.rebuild_status.take();
+        }
         Ok(HttpResponse::Ok().json(record))
     } else {
         Ok(HttpResponse::NotFound().finish())

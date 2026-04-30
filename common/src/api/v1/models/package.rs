@@ -1,4 +1,4 @@
-use crate::api::v1::{ArtifactStatus, BuildStatus};
+use crate::api::v1::BuildStatus;
 use chrono::NaiveDateTime;
 #[cfg(feature = "diesel")]
 use diesel::Queryable;
@@ -63,11 +63,14 @@ pub struct BinaryPackage {
     pub component: Option<String>,
     pub architecture: String,
     pub url: String,
-    pub status: Option<ArtifactStatus>,
+    pub status: Option<BuildStatus>,
     pub build_id: Option<i32>,
     pub artifact_id: Option<i32>,
     pub diffoscope_log_id: Option<i32>,
     pub attestation_log_id: Option<i32>,
     pub last_seen: NaiveDateTime,
     pub seen_in_last_sync: bool,
+    /// Build-level status. Unlike `status` (artifact-level), this can be `Fail`
+    /// when the build process itself failed before producing any artifacts.
+    pub rebuild_status: Option<BuildStatus>,
 }

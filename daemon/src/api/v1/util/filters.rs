@@ -282,9 +282,7 @@ where
     type Output = Box<dyn BoxableExpression<T, Sqlite, SqlType = Self::SqlType>>;
 
     fn into_filter(self) -> Self::Output {
-        match self.seen_only {
-            Some(seen_only) => Box::new(source_packages::seen_in_last_sync.is(seen_only)),
-            None => Box::new(AsExpression::<Bool>::as_expression(true)),
-        }
+        let seen_only = self.seen_only.unwrap_or(true);
+        Box::new(source_packages::seen_in_last_sync.is(seen_only))
     }
 }

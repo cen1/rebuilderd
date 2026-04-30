@@ -18,6 +18,8 @@ set -eo pipefail
 # MUST SET PRESERVE_TIMESTAMP=yes in /usr/local/etc/poudriere.conf
 # MUST SET PKG_REPRODUCIBLE=yes
 
+echo "Starting rebuild of ${1} at $(date -u)"
+
 # Cleanup function for unexpected exits
 cleanup_on_exit() {
   if [ -n "$JAIL" ] && [ -n "$PORTS_TREE" ]; then

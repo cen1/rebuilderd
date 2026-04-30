@@ -20,6 +20,7 @@ pub struct BinaryPackage {
     pub version: String,
     pub architecture: String,
     pub artifact_url: String,
+    pub seen_in_last_sync: bool,
 }
 
 #[derive(Insertable, PartialEq, Eq, Debug, Clone)]
@@ -31,6 +32,7 @@ pub struct NewBinaryPackage {
     pub version: String,
     pub architecture: String,
     pub artifact_url: String,
+    pub seen_in_last_sync: bool,
 }
 
 impl NewBinaryPackage {
@@ -48,11 +50,8 @@ impl NewBinaryPackage {
             ))
             .do_update()
             .set((
-                source_package_id.eq(excluded(source_package_id)),
-                build_input_id.eq(excluded(build_input_id)),
-                name.eq(excluded(name)),
-                version.eq(excluded(version)),
-                architecture.eq(excluded(architecture)),
+                artifact_url.eq(excluded(artifact_url)),
+                seen_in_last_sync.eq(excluded(seen_in_last_sync)),
             ))
             .returning(BinaryPackage::as_select())
             .get_result::<BinaryPackage>(connection)?;

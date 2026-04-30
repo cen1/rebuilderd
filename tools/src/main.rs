@@ -9,7 +9,7 @@ use glob::Pattern;
 use nom::AsBytes;
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::{
-    ArtifactStatus, BinaryIdentityFilter, BinaryPackage, BuildRestApi, BuildStatus, OriginFilter,
+    BinaryIdentityFilter, BinaryPackage, BuildRestApi, BuildStatus, OriginFilter,
     PackageReport, PackageRestApi, Page, Priority, QueueJobRequest, QueueRestApi,
     SourceIdentityFilter, StatsCollectRequest, StatsRestApi, WorkerRestApi,
 };
@@ -311,7 +311,7 @@ async fn main() -> Result<()> {
                     results.records.retain(|pkg| {
                         // If our filter is "UNKWN", match packages with status == null
                         pkg.status == ls.filter.status
-                            || (*status == ArtifactStatus::Unknown && pkg.status.is_none())
+                            || (*status == BuildStatus::Unknown && pkg.status.is_none())
                     });
                 }
 
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
                     for package in results.records {
                         let status_str = format!(
                             "[{}]",
-                            package.status.unwrap_or(ArtifactStatus::Unknown).fancy()
+                            package.status.unwrap_or(BuildStatus::Unknown).fancy()
                         )
                         .bold();
 
