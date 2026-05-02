@@ -1,22 +1,63 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# https://pkg-status.freebsd.org/
-# https://api.github.com/repos/freebsd/freebsd-ports/commits?sha=main&per_page=1000
-# rebuilder-freebsd.sh: A script to rebuild FreeBSD packages for rebuilderd.
-# This script is invoked by the rebuilderd-worker.
-# Manual testing: 
-# fetch https://pkg.freebsd.org/FreeBSD:14:amd64/latest/All/hello-2.12.2.pkg
-# REBUILDERD_OUTDIR=/tmp/out JAIL=rebuilderd-1-14-amd64 PORTS_TREE=worker1 ./rebuilder-freebsd.sh hello-2.12.2.pkg
-
+# rebuilder-freebsd.sh — rebuild a FreeBSD port for rebuilderd-worker.
+#
+# Useful links:
+#   https://pkg-status.freebsd.org/
+#   https://api.github.com/repos/freebsd/freebsd-ports/commits?sha=main&per_page=1000
+#
+# Invocation:
+#   rebuilderd-worker calls this script with a single binary .pkg file as $1.
+#   That package is used only to identify the port *origin* (e.g. net/ethersync).
+#   A FreeBSD port can produce multiple split packages from a single build run
+#   (e.g. java/openjdk26 → openjdk26, openjdk26-jre, openjdk26-jre-headless).
+#   rebuilderd schedules one queue entry per port origin and registers every split
+#   package as a separate artifact on that entry.  This script therefore builds
+#   the entire port with poudriere and collects *all* resulting .pkg files into
+#   REBUILDERD_OUTDIR.  rebuilderd-worker then compares each rebuilt package
+#   against its corresponding artifact URL and reports an individual result.
+#
 # Arguments:
-#   $1: Path to the .txz package to rebuild.
-
-# Environment variables:
-#   REBUILDERD_OUTDIR: Directory to place the rebuilt package in.
-
-# MUST SET PRESERVE_TIMESTAMP=yes in /usr/local/etc/poudriere.conf
-# MUST SET PKG_REPRODUCIBLE=yes
+#   $1  Path to a representative .pkg file for the port to rebuild.
+#       The file is unpacked to read its +MANIFEST, which provides:
+#         - origin            (e.g. "java/openjdk26")  — drives the poudriere build
+#         - name / version    — used for logging only
+#         - ports_top_git_hash — commit checked out for the ports tree
+#         - build_timestamp   — recorded for SOURCE_DATE_EPOCH (future use)
+#         - arch              — selects the appropriate jail and ports tree
+#
+# Environment variables (required):
+#   REBUILDERD_OUTDIR       Directory into which all rebuilt .pkg files are moved.
+#
+# Environment variables (optional):
+#   REBUILDERD_WORKER_NAME  Logical name used to derive jail and ports-tree names
+#                           (default: output of `hostname -s`).  Dashes are replaced
+#                           with underscores because poudriere disallows dashes in
+#                           ports-tree names.
+#   JAIL                    Override the poudriere jail name entirely.
+#                           Default: rebuilderd-<worker>-<major>-<arch>
+#   PORTS_TREE              Override the poudriere ports-tree name entirely.
+#                           Default: <worker> (same as WORKER_NAME_SAFE)
+#
+# poudriere.conf requirements:
+#   PRESERVE_TIMESTAMP=yes  — required for timestamp reproducibility
+#   PKG_REPRODUCIBLE=yes    — required for reproducible package metadata
+#
+# Manual testing example (port with multiple split packages):
+#   fetch https://pkg.freebsd.org/FreeBSD:14:amd64/latest/All/openjdk26-26.0.0.pkg
+#   mkdir -p /tmp/out
+#   REBUILDERD_OUTDIR=/tmp/out \
+#     JAIL=rebuilderd-test-14-amd64 \
+#     PORTS_TREE=workertest \
+#     ./rebuilder-freebsd.sh openjdk26-26.0.0.pkg
+#   # All split packages (openjdk26, openjdk26-jre, openjdk26-jre-headless, …)
+#   # should appear in /tmp/out/.
+#
+# Manual testing example (single-binary port):
+#   fetch https://pkg.freebsd.org/FreeBSD:14:amd64/latest/All/hello-2.12.2.pkg
+#   REBUILDERD_OUTDIR=/tmp/out JAIL=rebuilderd-1-14-amd64 PORTS_TREE=worker1 \
+#     ./rebuilder-freebsd.sh hello-2.12.2.pkg
 
 echo "Starting rebuild of ${1} at $(date -u)"
 
@@ -48,8 +89,10 @@ if [ ! -f "$INPUT_PKG" ]; then
   exit 1
 fi
 
-# 1. Identify the port origin
-# Unpack the input .txz and read its +MANIFEST to get the 'origin' field.
+# 1. Identify the port origin.
+# Unpack the representative input .pkg and read its +MANIFEST to extract the
+# 'origin' field (and other metadata).  The input package itself is not built —
+# it is only used as a source of metadata to drive the poudriere build.
 PKG_DIR=$(mktemp -d)
 # Use bsdtar as it's the default on FreeBSD
 bsdtar -xf "$INPUT_PKG" -C "$PKG_DIR"
@@ -120,7 +163,7 @@ if [ -z "$JAIL" ]; then
   JAIL="rebuilderd-${WORKER_NAME_SAFE}-${FREEBSD_MAJOR}-${PKG_ARCH}"
 fi
 if [ -z "$PORTS_TREE" ]; then
-  PORTS_TREE="worker${WORKER_NAME_SAFE}"
+  PORTS_TREE="${WORKER_NAME_SAFE}"
 fi
 
 echo "Using jail: $JAIL (FreeBSD $FREEBSD_RELEASE)"
@@ -349,24 +392,40 @@ else
     echo "Warning: Poudriere build log not found at: $BUILD_LOG_PATH" >&2
 fi
 
-# 4. Output the rebuilt package
-# poudriere places the built packages in a directory structure.
-# We need to find the correct package and move it to REBUILDERD_OUTDIR.
+# 4. Collect all rebuilt packages for this port origin.
+#
+# Why collect multiple packages?
+#   poudriere bulk builds an entire port in one run, producing *all* split packages
+#   at once (e.g. openjdk26, openjdk26-jre, openjdk26-jre-headless).  rebuilderd
+#   schedules one queue entry per port origin and records each binary .pkg as a
+#   separate artifact on that entry.  This script must therefore output every split
+#   package so that rebuilderd-worker can diff each one against its artifact URL
+#   and report an individual GOOD/BAD result per binary.
+#
+# Detection strategy:
+#   Iterate over every .pkg in poudriere's .latest/All directory.  Use `pkg info -F`
+#   to read the embedded origin field from each package.  Move only the files whose
+#   origin matches $ORIGIN to REBUILDERD_OUTDIR.  Finding zero matching packages is
+#   treated as a build error.
 POUDRIERE_PKG_DIR="/usr/local/poudriere/data/packages/${JAIL}-${PORTS_TREE}/.latest/All"
-BUILT_PKG=$(find "$POUDRIERE_PKG_DIR" -name "${PKG_NAME}-${PKG_VERSION}*.pkg")
 
-if [ -z "$BUILT_PKG" ] || [ ! -f "$BUILT_PKG" ]; then
-    echo "Error: Could not find the built package for origin '$ORIGIN'." >&2
+echo "Collecting all packages for origin '$ORIGIN'..."
+pkg_count=0
+for pkg_file in "$POUDRIERE_PKG_DIR"/*.pkg; do
+    [ -f "$pkg_file" ] || continue
+    file_origin=$(pkg info -F "$pkg_file" | awk '/^Origin/ {print $2}')
+    if [ "$file_origin" = "$ORIGIN" ]; then
+        mv "$pkg_file" "$REBUILDERD_OUTDIR/"
+        echo "  Moved: $(basename "$pkg_file")"
+        pkg_count=$((pkg_count + 1))
+    fi
+done
+
+if [ "$pkg_count" -eq 0 ]; then
+    echo "Error: Could not find any packages for origin '$ORIGIN' in '$POUDRIERE_PKG_DIR'." >&2
     exit 1
 fi
 
-# Move the package to the output directory
-# The differ script will handle comparison and can tolerate metadata differences
-echo "Moving rebuilt package to output directory..."
-mv "$BUILT_PKG" "$REBUILDERD_OUTDIR/"
-REBUILT_PKG_PATH="$REBUILDERD_OUTDIR/$(basename "$BUILT_PKG")"
-
 echo ""
-echo "Build complete for '$ORIGIN'"
-echo "  Rebuilt package: $REBUILT_PKG_PATH"
+echo "Build complete for '$ORIGIN' ($pkg_count package(s))"
 exit 0

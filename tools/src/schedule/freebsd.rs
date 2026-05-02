@@ -247,28 +247,40 @@ pub async fn sync(http: &http::Client, sync: &PkgsSync) -> Result<Vec<PackageRep
                 }
             }
 
-            // Second pass: create reports with calculated commit timestamps
-            let mut source_packages = Vec::new();
+            // Second pass: group packages by (origin, version).
+            // A single FreeBSD port can produce multiple split packages (e.g.
+            // java/openjdk26 → openjdk26, openjdk26-jre, openjdk26-jre-headless).
+            // Grouping them under one SourcePackageReport means one build_input and
+            // one queue entry per port, and poudriere produces all split packages in
+            // a single run anyway.
+            let mut groups: HashMap<(String, String), SourcePackageReport> = HashMap::new();
             for info in package_infos {
                 let fbsd_ports_top_git_timestamp = info.git_hash.as_ref()
                     .and_then(|hash| commit_timestamps.get(hash).copied());
 
-                let source_report = SourcePackageReport {
-                    name: info.pkg.origin.clone(),
+                let artifact = BinaryPackageReport {
+                    name: info.pkg.name.clone(),
                     version: info.pkg.version.clone(),
+                    architecture: info.pkg.arch.clone(),
                     url: info.pkg_url.clone(),
-                    artifacts: vec![BinaryPackageReport {
-                        name: info.pkg.name.clone(),
-                        version: info.pkg.version.clone(),
-                        architecture: info.pkg.arch.clone(),
-                        url: info.pkg_url,
-                    }],
-                    fbsd_ports_top_git_hash: info.git_hash,
-                    fbsd_build_timestamp: info.build_timestamp,
-                    fbsd_ports_top_git_timestamp,
                 };
-                source_packages.push(source_report);
+
+                let key = (info.pkg.origin.clone(), info.pkg.version.clone());
+                if let Some(group) = groups.get_mut(&key) {
+                    group.artifacts.push(artifact);
+                } else {
+                    groups.insert(key, SourcePackageReport {
+                        name: info.pkg.origin.clone(),
+                        version: info.pkg.version.clone(),
+                        url: info.pkg_url, // first binary's URL becomes the build_input URL
+                        artifacts: vec![artifact],
+                        fbsd_ports_top_git_hash: info.git_hash,
+                        fbsd_build_timestamp: info.build_timestamp,
+                        fbsd_ports_top_git_timestamp,
+                    });
+                }
             }
+            let source_packages: Vec<SourcePackageReport> = groups.into_values().collect();
 
             reports.push(PackageReport {
                 distribution: "freebsd".to_string(),
