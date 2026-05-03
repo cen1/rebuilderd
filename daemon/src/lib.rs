@@ -129,6 +129,12 @@ pub fn build_server(
                                     .service(api::v1::register_worker)
                                     .service(api::v1::get_worker)
                                     .service(api::v1::unregister_worker),
+                            )
+                            .service(
+                                scope("/peers")
+                                    .service(api::v1::list_peers)
+                                    .service(api::v1::check_peers)
+                                    .service(api::v1::get_peer_package),
                             ),
                     ),
             )

@@ -2,6 +2,7 @@ mod build;
 mod dashboard;
 mod meta;
 mod package;
+mod peers;
 mod queue;
 mod stats;
 mod worker;
@@ -10,6 +11,7 @@ pub use build::*;
 pub use dashboard::*;
 pub use meta::*;
 pub use package::*;
+pub use peers::*;
 pub use queue::*;
 use serde::{Deserialize, Serialize};
 pub use stats::*;
@@ -84,6 +86,33 @@ pub struct FreshnessFilter {
 pub struct StatusFilter {
     #[serde(default, deserialize_with = "deserialize_comma_separated")]
     pub status: Option<Vec<String>>,
+}
+
+/// Filter binary packages by whether they have a peer-disagreement flag set.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DisagreementFilter {
+    /// Any disagreement with a peer: status mismatch OR sha256 mismatch.
+    pub has_disagreement: Option<bool>,
+    /// Both sides GOOD but sha256 hashes differ — the most interesting case.
+    pub sha256_mismatch: Option<bool>,
+    /// Restrict disagreement/sha256_mismatch checks to peers whose URL contains any of these
+    /// substrings. Comma-delimited: `peer=a,b`.
+    #[serde(default, deserialize_with = "deserialize_peer_filter")]
+    pub peer: Vec<String>,
+}
+
+fn deserialize_peer_filter<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(|s| {
+        s.split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect()
+    })
+    .unwrap_or_default())
 }
 
 fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>

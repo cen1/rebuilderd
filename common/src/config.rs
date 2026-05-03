@@ -91,6 +91,9 @@ pub struct HttpConfig {
     pub transparently_sign_attestations: Option<bool>,
     pub endpoint: Option<String>,
     pub permissive_cors: Option<bool>,
+    /// Maximum number of peer attestation fetches per minute during bulk peer check.
+    /// Defaults to 200.
+    pub peer_attestation_rate_limit: Option<u32>,
 }
 
 impl HttpConfig {
@@ -103,6 +106,9 @@ impl HttpConfig {
         }
         if c.endpoint.is_some() {
             self.endpoint = c.endpoint;
+        }
+        if c.peer_attestation_rate_limit.is_some() {
+            self.peer_attestation_rate_limit = c.peer_attestation_rate_limit;
         }
     }
 }

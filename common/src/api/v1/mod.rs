@@ -678,6 +678,59 @@ impl WorkerRestApi for Client {
 }
 
 #[async_trait]
+pub trait PeersRestApi {
+    /// Register peer rebuilder URLs for the given distribution/architecture and
+    /// trigger a background bulk cross-check on the daemon (returns 202).
+    async fn check_peers(&self, request: CheckPeersRequest) -> Result<()>;
+
+    /// Proxy a per-package status lookup to all registered peer rebuilders.
+    /// The daemon calls each peer and returns a combined result so the frontend
+    /// does not need to deal with CORS.
+    async fn get_peer_package_status(
+        &self,
+        distribution: &str,
+        architecture: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<Vec<PeerStatusEntry>>;
+}
+
+#[async_trait]
+impl PeersRestApi for Client {
+    async fn check_peers(&self, request: CheckPeersRequest) -> Result<()> {
+        self.post(Cow::Borrowed("api/v1/peers/check"))
+            .json(&request)
+            .send_encoded()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn get_peer_package_status(
+        &self,
+        distribution: &str,
+        architecture: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<Vec<PeerStatusEntry>> {
+        let entries = self
+            .get(Cow::Borrowed("api/v1/peers/package"))
+            .query(&[
+                ("distribution", distribution),
+                ("architecture", architecture),
+                ("name", name),
+                ("version", version),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(entries)
+    }
+}
+
+#[async_trait]
 pub trait StatsRestApi {
     async fn collect_stats(&self, request: StatsCollectRequest) -> Result<Vec<StatsSnapshot>>;
     async fn get_stats(&self, filter: Option<&StatsFilter>) -> Result<Vec<StatsSnapshot>>;

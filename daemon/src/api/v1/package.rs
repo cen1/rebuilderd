@@ -11,7 +11,8 @@ use crate::config::Config;
 use crate::db::{Pool, SqliteConnectionWrap};
 use crate::models::{BuildInput, NewBinaryPackage, NewBuildInput, NewQueued, NewSourcePackage};
 use crate::schema::{
-    binary_packages, build_inputs, queue, rebuild_artifacts, rebuilds, source_packages,
+    binary_packages, build_inputs, peer_rebuilders, peer_sha256_checks, queue, rebuild_artifacts,
+    rebuilds, source_packages,
 };
 use crate::web;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post};
@@ -23,10 +24,12 @@ use diesel::sql_types::Integer;
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection, SqliteExpressionMethods,
+    TextExpressionMethods,
 };
 use rebuilderd_common::api::v1::{
-    BinaryIdentityFilter, BuildStatus, FreshnessFilter, OriginFilter, PackageReport, Page,
-    Priority, ResultPage, SourceIdentityFilter, SourcePackageReport, StatusFilter
+    BinaryIdentityFilter, BuildStatus, DisagreementFilter, FreshnessFilter, OriginFilter,
+    PackageReport, Page, Priority, ResultPage, SourceIdentityFilter, SourcePackageReport,
+    StatusFilter,
 };
 use rebuilderd_common::errors::Error;
 
@@ -597,9 +600,30 @@ pub async fn get_binary_packages(
     binary_identity_filter: web::Query<BinaryIdentityFilter>,
     freshness_filter: web::Query<FreshnessFilter>,
     status_filter: web::Query<StatusFilter>,
+    disagreement_filter: web::Query<DisagreementFilter>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
     let seen_only = freshness_filter.into_inner().seen_only.unwrap_or(true);
+    let df = disagreement_filter.into_inner();
+    let has_disagreement = df.has_disagreement;
+    let sha256_mismatch = df.sha256_mismatch;
+    // Build SQL OR-LIKE fragment for peer URL filtering, e.g.:
+    // "(peer_rebuilders.url LIKE '%a%' OR peer_rebuilders.url LIKE '%b%')"
+    let peer_url_sql: Option<String> = if df.peer.is_empty() {
+        None
+    } else {
+        let parts: Vec<String> = df
+            .peer
+            .iter()
+            .map(|p| {
+                format!(
+                    "peer_rebuilders.url LIKE '%{}%'",
+                    p.replace('\'', "''") // escape single quotes
+                )
+            })
+            .collect();
+        Some(format!("({})", parts.join(" OR ")))
+    };
 
     let mut query = binary_packages_base()
         .filter(
@@ -615,6 +639,74 @@ pub async fn get_binary_packages(
         ))
         .filter(binary_packages::seen_in_last_sync.is(seen_only))
         .into_boxed();
+
+    if let Some(flag) = has_disagreement {
+        // A binary package disagrees with peers when peer_sha256_checks has an entry
+        // for its (name, version) where:
+        //   sha256_match = false  — both GOOD but hashes differ, OR
+        //   peer_status IS NOT NULL AND sha256_match IS NULL — status disagreement
+        // Join peer_rebuilders so we only match checks for the same architecture
+        // as the binary package being queried (and optionally filter by peer URL).
+        let base_sub = peer_sha256_checks::table
+            .inner_join(peer_rebuilders::table)
+            .filter(peer_sha256_checks::binary_name.eq(binary_packages::name))
+            .filter(peer_sha256_checks::binary_version.eq(binary_packages::version))
+            .filter(peer_rebuilders::architecture.eq(binary_packages::architecture))
+            .filter(
+                peer_sha256_checks::sha256_match.is(false).or(
+                    peer_sha256_checks::peer_status
+                        .is_not_null()
+                        .and(peer_sha256_checks::sha256_match.is_null()),
+                ),
+            );
+        if flag {
+            if let Some(ref sql) = peer_url_sql {
+                query = query.filter(exists(
+                    base_sub
+                        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                        .select(peer_sha256_checks::id),
+                ));
+            } else {
+                query = query.filter(exists(base_sub.select(peer_sha256_checks::id)));
+            }
+        } else if let Some(ref sql) = peer_url_sql {
+            query = query.filter(not(exists(
+                base_sub
+                    .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                    .select(peer_sha256_checks::id),
+            )));
+        } else {
+            query = query.filter(not(exists(base_sub.select(peer_sha256_checks::id))));
+        }
+    }
+
+    if let Some(flag) = sha256_mismatch {
+        let sha_sub = peer_sha256_checks::table
+            .inner_join(peer_rebuilders::table)
+            .filter(peer_sha256_checks::binary_name.eq(binary_packages::name))
+            .filter(peer_sha256_checks::binary_version.eq(binary_packages::version))
+            .filter(peer_rebuilders::architecture.eq(binary_packages::architecture))
+            .filter(peer_sha256_checks::sha256_match.is(false));
+        if flag {
+            if let Some(ref sql) = peer_url_sql {
+                query = query.filter(exists(
+                    sha_sub
+                        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                        .select(peer_sha256_checks::id),
+                ));
+            } else {
+                query = query.filter(exists(sha_sub.select(peer_sha256_checks::id)));
+            }
+        } else if let Some(ref sql) = peer_url_sql {
+            query = query.filter(not(exists(
+                sha_sub
+                    .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                    .select(peer_sha256_checks::id),
+            )));
+        } else {
+            query = query.filter(not(exists(sha_sub.select(peer_sha256_checks::id))));
+        }
+    }
 
     // Apply status filter if provided
     if let Some(ref statuses) = status_filter.status {
@@ -698,6 +790,70 @@ pub async fn get_binary_packages(
             source_packages::name,
         ))
         .into_boxed();
+
+    if let Some(flag) = has_disagreement {
+        let base_sub = peer_sha256_checks::table
+            .inner_join(peer_rebuilders::table)
+            .filter(peer_sha256_checks::binary_name.eq(binary_packages::name))
+            .filter(peer_sha256_checks::binary_version.eq(binary_packages::version))
+            .filter(peer_rebuilders::architecture.eq(binary_packages::architecture))
+            .filter(
+                peer_sha256_checks::sha256_match.is(false).or(
+                    peer_sha256_checks::peer_status
+                        .is_not_null()
+                        .and(peer_sha256_checks::sha256_match.is_null()),
+                ),
+            );
+        if flag {
+            if let Some(ref sql) = peer_url_sql {
+                count_query = count_query.filter(exists(
+                    base_sub
+                        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                        .select(peer_sha256_checks::id),
+                ));
+            } else {
+                count_query = count_query.filter(exists(base_sub.select(peer_sha256_checks::id)));
+            }
+        } else if let Some(ref sql) = peer_url_sql {
+            count_query = count_query.filter(not(exists(
+                base_sub
+                    .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                    .select(peer_sha256_checks::id),
+            )));
+        } else {
+            count_query =
+                count_query.filter(not(exists(base_sub.select(peer_sha256_checks::id))));
+        }
+    }
+
+    if let Some(flag) = sha256_mismatch {
+        let sha_sub = peer_sha256_checks::table
+            .inner_join(peer_rebuilders::table)
+            .filter(peer_sha256_checks::binary_name.eq(binary_packages::name))
+            .filter(peer_sha256_checks::binary_version.eq(binary_packages::version))
+            .filter(peer_rebuilders::architecture.eq(binary_packages::architecture))
+            .filter(peer_sha256_checks::sha256_match.is(false));
+        if flag {
+            if let Some(ref sql) = peer_url_sql {
+                count_query = count_query.filter(exists(
+                    sha_sub
+                        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                        .select(peer_sha256_checks::id),
+                ));
+            } else {
+                count_query = count_query.filter(exists(sha_sub.select(peer_sha256_checks::id)));
+            }
+        } else if let Some(ref sql) = peer_url_sql {
+            count_query = count_query.filter(not(exists(
+                sha_sub
+                    .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(sql))
+                    .select(peer_sha256_checks::id),
+            )));
+        } else {
+            count_query =
+                count_query.filter(not(exists(sha_sub.select(peer_sha256_checks::id))));
+        }
+    }
 
     // Apply status filter to count query
     if let Some(ref statuses) = status_filter.status {

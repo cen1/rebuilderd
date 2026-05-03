@@ -38,8 +38,26 @@ pub enum SubCommand {
     /// Stats related subcommands
     #[command(subcommand)]
     Stats(Stats),
+    /// Peer rebuilder cross-check subcommands
+    #[command(subcommand)]
+    Peers(Peers),
     /// Generate shell completions
     Completions(Completions),
+}
+
+#[derive(Debug, Parser)]
+pub enum Peers {
+    /// Compare our rebuild results against configured peer rebuilder instances
+    Check(PeersCheck),
+}
+
+#[derive(Debug, Parser)]
+pub struct PeersCheck {
+    /// Path to the rebuilderd-sync.conf file with peer_rebuilders configured
+    #[arg(long = "sync-config", default_value = "/etc/rebuilderd-sync.conf")]
+    pub config_file: String,
+    /// Only process the named profile (default: all profiles with peer_rebuilders)
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Parser)]

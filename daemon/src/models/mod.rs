@@ -9,6 +9,8 @@ import_models!(rebuild);
 import_models!(rebuild_artifact);
 import_models!(binary_package);
 import_models!(build_input);
+import_models!(peer_rebuilder);
+import_models!(peer_sha256_check);
 import_models!(source_package);
 import_models!(worker);
 import_models!(queue);

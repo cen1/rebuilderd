@@ -1,0 +1,9 @@
+[Unit]
+Description=rebuilderctl peers: cross-check packages against peer rebuilders
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

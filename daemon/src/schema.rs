@@ -104,6 +104,31 @@ diesel::table! {
 }
 
 diesel::table! {
+    peer_rebuilders (id) {
+        id -> Integer,
+        url -> Text,
+        distribution -> Text,
+        architecture -> Text,
+        release -> Text,
+        release_alias -> Text,
+    }
+}
+
+diesel::table! {
+    peer_sha256_checks (id) {
+        id -> Integer,
+        peer_rebuilder_id -> Integer,
+        binary_name -> Text,
+        binary_version -> Text,
+        peer_build_id -> Nullable<Integer>,
+        local_rebuild_id -> Nullable<Integer>,
+        sha256_match -> Nullable<Bool>,
+        checked_at -> Timestamp,
+        peer_status -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     source_packages (id) {
         id -> Integer,
         name -> Text,
@@ -135,6 +160,7 @@ diesel::joinable!(binary_packages -> build_inputs (build_input_id));
 diesel::joinable!(binary_packages -> source_packages (source_package_id));
 diesel::joinable!(build_inputs -> source_packages (source_package_id));
 diesel::joinable!(queue -> build_inputs (build_input_id));
+diesel::joinable!(peer_sha256_checks -> peer_rebuilders (peer_rebuilder_id));
 diesel::joinable!(rebuild_artifacts -> attestation_logs (attestation_log_id));
 diesel::joinable!(rebuild_artifacts -> diffoscope_logs (diffoscope_log_id));
 diesel::joinable!(rebuild_artifacts -> rebuilds (rebuild_id));
@@ -148,6 +174,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     build_inputs,
     build_logs,
     diffoscope_logs,
+    peer_rebuilders,
+    peer_sha256_checks,
     queue,
     rebuild_artifacts,
     rebuilds,

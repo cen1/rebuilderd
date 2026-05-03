@@ -332,30 +332,19 @@ fi
 # The following command will build the port and its dependencies.
 # The official build flags should be configured in poudriere.conf, for example:
 
-# If package depends on rust/llvm you will get OoOmed with anything less than 32G RAM
-# Reducing parallel jobs can help somewhat.
-# Detect if both rust and llvm will be built (memory-intensive combination)
-# Toggle manually if constrained
-if false ; then
-  echo "Checking if build requires memory-intensive dependencies (rust and llvm)..."
-  POUDRIERE_BULK_ARGS=""
-
-  # Use poudriere to check what will be built (dry-run)
-  BUILD_LIST=$(poudriere bulk -n -j "$JAIL" -p "$PORTS_TREE" "$ORIGIN" 2>&1 | grep -E "^\[" | grep -oE "(lang/rust|devel/llvm[0-9]*|devel/cmake)" || true)
-
-  # Count how many memory-intensive packages will be built
-  HAS_RUST=$(echo "$BUILD_LIST" | grep -c "lang/rust" || true)
-  HAS_LLVM=$(echo "$BUILD_LIST" | grep -c "devel/llvm" || true)
-  HAS_CMAKE=$(echo "$BUILD_LIST" | grep -c "devel/cmake" || true)
-
-  # If building both rust and llvm, limit to 1 builder to avoid OOM
-  if [ "$HAS_RUST" -gt 0 ] && [ "$HAS_LLVM" -gt 0 ]; then
-    echo "⚠️  WARNING: Build requires both rust and llvm - limiting to 1 parallel builder to prevent OOM"
-    POUDRIERE_BULK_ARGS="-J 1"
-  elif [ "$HAS_RUST" -gt 0 ] || [ "$HAS_LLVM" -gt 0 ]; then
-    echo "Note: Build requires rust or llvm - these are memory-intensive"
-  fi
-fi
+# lang/rust OOM prevention
+#
+# rust-installer's "combine" step decompresses 9+ xz tarballs (rustc, cargo,
+# rust-analyzer, clippy, …) into the WRKDIR and re-combines them into one
+# archive.  When WRKDIR lives on tmpfs this can spike RAM usage to 8-10 GB and
+# trigger the OOM killer — even after compilation itself succeeds.
+#
+# Fix: add the following to poudriere.conf on each worker host:
+#   TMPFS_BLACKLIST="rust"
+#   TMPFS_BLACKLIST_TMPDIR=/path/to/scratch
+#
+# Reference: https://forums.freebsd.org/threads/lang-rust-poudriere-build-oom-killer.87803/
+POUDRIERE_BULK_ARGS=""
 
 # Run poudriere bulk and handle "jail already running" error
 # Use tee to show output in real-time while capturing to file

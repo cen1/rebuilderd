@@ -9,9 +9,9 @@ use glob::Pattern;
 use nom::AsBytes;
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::{
-    BinaryIdentityFilter, BinaryPackage, BuildRestApi, BuildStatus, OriginFilter,
-    PackageReport, PackageRestApi, Page, Priority, QueueJobRequest, QueueRestApi,
-    SourceIdentityFilter, StatsCollectRequest, StatsRestApi, WorkerRestApi,
+    BinaryIdentityFilter, BinaryPackage, BuildRestApi, BuildStatus, CheckPeersRequest,
+    OriginFilter, PackageReport, PackageRestApi, Page, PeersRestApi, Priority, QueueJobRequest,
+    QueueRestApi, SourceIdentityFilter, StatsCollectRequest, StatsRestApi, WorkerRestApi,
 };
 use rebuilderd_common::errors::*;
 use rebuilderd_common::http;
@@ -524,6 +524,78 @@ async fn main() -> Result<()> {
                     snapshot.fail,
                     snapshot.unknown,
                 );
+            }
+        }
+        SubCommand::Peers(Peers::Check(args)) => {
+            let sync_config = SyncConfigFile::load(&args.config_file)?;
+            let client = client.with_auth_cookie()?;
+
+            // Iterate over all (or the selected) sync profiles.
+            for (profile_name, profile) in &sync_config.profiles {
+                if let Some(ref selected) = args.profile {
+                    if profile_name != selected {
+                        continue;
+                    }
+                }
+
+                if profile.peer_rebuilders.is_empty() {
+                    continue;
+                }
+
+                // Build (local_release, peer_release_alias) pairs.
+                // peer_release_aliases[i] overrides releases[i]; empty string = same as local.
+                // If releases is empty (e.g. Arch Linux), one request with release = None.
+                let release_pairs: Vec<(Option<String>, Option<String>)> =
+                    if profile.releases.is_empty() {
+                        vec![(None, None)]
+                    } else {
+                        profile
+                            .releases
+                            .iter()
+                            .enumerate()
+                            .map(|(i, local_rel)| {
+                                let alias =
+                                    profile.peer_release_aliases.get(i).map(String::as_str);
+                                let peer_alias = match alias {
+                                    Some(a) if !a.is_empty() => a.to_owned(),
+                                    _ => local_rel.clone(),
+                                };
+                                (Some(local_rel.clone()), Some(peer_alias))
+                            })
+                            .collect()
+                    };
+
+                for arch in &profile.architectures {
+                    // Send raw template URLs (e.g. containing {arch}) — the daemon
+                    // substitutes {arch} at fetch time so the template URL is used as
+                    // the stable key in the peer_rebuilders table.
+                    let urls: Vec<String> = profile.peer_rebuilders.clone();
+                    for (local_rel, peer_alias) in &release_pairs {
+                        info!(
+                            "Checking peers for profile {:?} ({}/{} release={:?} alias={:?})",
+                            profile_name, profile.distro, arch, local_rel, peer_alias,
+                        );
+                        client
+                            .check_peers(CheckPeersRequest {
+                                distribution: profile.distro.clone(),
+                                architecture: arch.clone(),
+                                release: local_rel.clone(),
+                                release_alias: peer_alias.clone(),
+                                urls: urls.clone(),
+                            })
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "Failed to trigger peer check for profile {:?}",
+                                    profile_name
+                                )
+                            })?;
+                        info!(
+                            "Peer check accepted for {}/{} release={:?} — running in background",
+                            profile.distro, arch, local_rel,
+                        );
+                    }
+                }
             }
         }
         SubCommand::Completions(completions) => args::gen_completions(&completions)?,

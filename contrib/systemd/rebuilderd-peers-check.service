@@ -1,0 +1,9 @@
+[Unit]
+Description=rebuilderctl peers: cross-check packages against peer rebuilders
+
+[Service]
+User=rebuilderd
+ExecStart=/usr/bin/rebuildctl peers check
+
+[Install]
+WantedBy=multi-user.target

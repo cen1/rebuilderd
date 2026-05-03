@@ -23,6 +23,8 @@ tags:
     description: Queries related to metadata about the database as a whole
   - name: stats
     description: Historical rebuild statistics snapshots
+  - name: peers
+    description: Cross-checking rebuild results against peer rebuilder instances
 paths:
   /builds:
     get:
@@ -338,6 +340,15 @@ paths:
         - $ref: '#/components/parameters/search_type'
         - $ref: '#/components/parameters/version'
         - $ref: '#/components/parameters/architecture'
+        - in: query
+          name: has_disagreement
+          required: false
+          schema:
+            type: boolean
+          description: |-
+            When `true`, only return packages whose build_input has been flagged as
+            disagreeing with at least one configured peer rebuilder. Run
+            `rebuildctl peers check` to populate these flags.
       responses:
         "200":
           description: Success
@@ -911,6 +922,88 @@ paths:
         "401":
           $ref: '#/components/responses/Unauthorized'
 
+  /peers/check:
+    post:
+      summary: Register peer rebuilders and trigger a background bulk cross-check
+      description: |-
+        Upserts the set of peer rebuilder URLs for the given distribution/architecture
+        pair, then spawns a background task that fetches all packages from each peer
+        and compares their GOOD/BAD status against local results.
+
+        Packages whose status disagrees with any peer are flagged with
+        `has_disagreement = true` on their build input, making them discoverable via
+        `GET /packages/binary?has_disagreement=true`.
+
+        The endpoint returns **202 Accepted** immediately; the comparison runs
+        asynchronously. Progress is logged by the daemon at INFO level.
+
+        Typically invoked via `rebuildctl peers check --sync-config /etc/rebuilderd-sync.conf`.
+      tags:
+        - peers
+      security:
+        - AuthCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckPeersRequest'
+      responses:
+        "202":
+          description: |-
+            Accepted. Peer table updated; background cross-check started.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /peers/package:
+    get:
+      summary: Live per-package status lookup across all registered peer rebuilders
+      description: |-
+        Fetches the status of a specific package from every peer rebuilder registered
+        for the given distribution/architecture. The daemon acts as a proxy so that
+        frontends are not blocked by CORS restrictions when calling remote rebuilder
+        instances directly.
+
+        For packages where both this instance and the peer report **GOOD**, the daemon
+        additionally fetches the peer's in-toto attestation and compares the `sha256`
+        of the rebuild artifact against the local attestation. The result is exposed as
+        `sha256_match`.
+
+        Peers must first be registered via `POST /peers/check`.
+      tags:
+        - peers
+      parameters:
+        - $ref: '#/components/parameters/distribution'
+        - in: query
+          name: architecture
+          required: true
+          schema:
+            type: string
+          description: Architecture of the package.
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+          description: Exact name of the binary package.
+        - in: query
+          name: version
+          required: true
+          schema:
+            type: string
+          description: Exact version string of the binary package.
+      responses:
+        "200":
+          description: |-
+            Success. Returns one entry per registered peer (empty array if no peers
+            are registered for the given distribution/architecture).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PeerStatusEntry'
+
 components:
   schemas:
     PublicKey:
@@ -1243,6 +1336,12 @@ components:
           description: The ID of the latest artifact of this package
           type: integer
           nullable: true
+        has_disagreement:
+          description: |-
+            `true` if the build input for this package has been flagged as disagreeing
+            with at least one peer rebuilder during the last `POST /peers/check` run.
+            Always `false` until `peers check` has been executed.
+          type: boolean
       additionalProperties: false
       required:
         - name
@@ -1252,6 +1351,86 @@ components:
         - component
         - architecture
         - url
+        - has_disagreement
+    CheckPeersRequest:
+      type: object
+      description: |-
+        Sent by `rebuildctl peers check` to register peer rebuilder URLs for a specific
+        distribution/architecture and trigger a background bulk cross-check.
+      properties:
+        distribution:
+          description: The distribution to register peers for (e.g. `archlinux`, `debian`).
+          type: string
+        architecture:
+          description: The architecture to register peers for (e.g. `x86_64`, `amd64`).
+          type: string
+        urls:
+          description: |-
+            Full versioned API base URLs of peer rebuilder instances.
+            Use `/api/v0` for older rebuilderd instances and `/api/v1` (or the
+            per-architecture variant such as `/amd64/api/v1`) for newer ones.
+          type: array
+          items:
+            type: string
+            format: uri
+          example:
+            - https://reproducible.archlinux.org/api/v0
+            - https://reproduce.debian.net/amd64/api/v1
+      additionalProperties: false
+      required:
+        - distribution
+        - architecture
+        - urls
+    PeerStatusEntry:
+      type: object
+      description: Status of a specific package as reported by a single peer rebuilder.
+      properties:
+        url:
+          description: API base URL of the peer rebuilder that was queried.
+          type: string
+          format: uri
+        status:
+          description: |-
+            The peer's rebuild status for this package.
+            `null` if the peer has not built the package (unknown to peer).
+          type: string
+          nullable: true
+          enum: [GOOD, BAD, FAIL, UNKWN, null]
+        build_id:
+          description: The peer's build ID for this package, if known.
+          type: integer
+          nullable: true
+        log_url:
+          description: |-
+            Direct URL to the peer's build log for this package (API endpoint).
+            Present whenever `build_id` is known.
+          type: string
+          nullable: true
+          format: uri
+        diffoscope_url:
+          description: |-
+            Direct URL to the peer's diffoscope output for this package.
+            Only present when the peer reports **BAD** and has diffoscope data available.
+          type: string
+          nullable: true
+          format: uri
+        sha256_match:
+          description: |-
+            SHA-256 hash comparison between this instance's rebuild and the peer's rebuild.
+            - `true`: both produced **GOOD** builds and the artifact sha256 hashes match.
+            - `false`: both produced **GOOD** builds but the sha256 hashes differ
+              (silent non-reproducibility — the builds disagree despite both passing).
+            - `null`: not both GOOD, or attestation unavailable on either side.
+          type: boolean
+          nullable: true
+      additionalProperties: false
+      required:
+        - url
+        - status
+        - build_id
+        - log_url
+        - diffoscope_url
+        - sha256_match
     PackageReport:
       type: object
       properties:
