@@ -121,8 +121,6 @@ diesel::table! {
         binary_name -> Text,
         binary_version -> Text,
         peer_build_id -> Nullable<Integer>,
-        local_rebuild_id -> Nullable<Integer>,
-        sha256_match -> Nullable<Bool>,
         checked_at -> Timestamp,
         peer_status -> Nullable<Text>,
     }

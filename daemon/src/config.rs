@@ -21,7 +21,6 @@ pub struct Config {
     pub transparently_sign_attestations: bool,
     pub permissive_cors: bool,
     pub schedule: ScheduleConfig,
-    pub peer_attestation_rate_limit: u32,
 }
 
 pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
@@ -48,7 +47,6 @@ pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
             .unwrap_or(true),
         permissive_cors: config.http.permissive_cors.unwrap_or(false),
         schedule: config.schedule,
-        peer_attestation_rate_limit: config.http.peer_attestation_rate_limit.unwrap_or(200),
     })
 }
 

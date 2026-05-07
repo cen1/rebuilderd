@@ -93,10 +93,8 @@ pub struct StatusFilter {
 pub struct DisagreementFilter {
     /// Any disagreement with a peer: status mismatch OR sha256 mismatch.
     pub has_disagreement: Option<bool>,
-    /// Both sides GOOD but sha256 hashes differ — the most interesting case.
-    pub sha256_mismatch: Option<bool>,
-    /// Restrict disagreement/sha256_mismatch checks to peers whose URL contains any of these
-    /// substrings. Comma-delimited: `peer=a,b`.
+    /// Restrict disagreement checks to peers whose URL contains any of these substrings.
+    /// Comma-delimited: `peer=a,b`.
     #[serde(default, deserialize_with = "deserialize_peer_filter")]
     pub peer: Vec<String>,
 }

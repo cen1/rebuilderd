@@ -34,9 +34,4 @@ pub struct PeerStatusEntry {
     /// Direct URL to the peer's diffoscope output, if the peer reported BAD
     /// and has diffoscope available.
     pub diffoscope_url: Option<String>,
-    /// `Some(true)` = both this instance and the peer produced GOOD builds
-    /// whose attestation sha256 hashes match.
-    /// `Some(false)` = both GOOD but hashes differ (silent non-reproducibility).
-    /// `None` = not both GOOD, or attestation unavailable on either side.
-    pub sha256_match: Option<bool>,
 }

@@ -8,9 +8,9 @@ services:
     command: ['rebuilderd', '-v', '-c', '/config/rebuilderd.conf']
     environment:
     - REBUILDERD_COOKIE_PATH=/secret/auth
-    - RUST_LOG=debug
+    - RUST_LOG=debug,hyper_util=info,hyper=info,reqwest=info,rustls=info
     volumes:
-    - ./secret:/secret
+    - ./data2/secret:/secret
     - ./data2:/data
     - ./data2/rebuilderd.conf:/config/rebuilderd.conf:ro
     - ./data2/rebuilderd-stats.conf:/etc/rebuilderd-stats.conf:ro

@@ -16,32 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// Attestation JSON structures (shared by local parsing and peer HTTP response)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct AttestationJson {
-    signed: AttestationSigned,
-}
-
-#[derive(Deserialize)]
-struct AttestationSigned {
-    products: HashMap<String, AttestationProduct>,
-}
-
-#[derive(Deserialize)]
-struct AttestationProduct {
-    sha256: Option<String>,
-}
-
-// Used with QueryableByName for raw SQL attestation fetch.
-#[derive(QueryableByName)]
-struct LocalAttestationRow {
-    #[diesel(sql_type = diesel::sql_types::Binary)]
-    attestation_log: Vec<u8>,
-}
-
 mod aliases {
     diesel::alias!(
         crate::schema::rebuilds as r1: PeersRebuildsAlias1,
@@ -55,29 +29,12 @@ use aliases::*;
 // ---------------------------------------------------------------------------
 
 struct LocalPkgInfo {
-    /// ID of the most recent local rebuild (None if never rebuilt).
-    local_rebuild_id: Option<i32>,
     status: BuildStatus,
 }
 
 struct PeerPkgInfo {
     status: BuildStatus,
     peer_build_id: Option<i32>,
-    /// v1 artifact ID (for attestation endpoint); None for v0 peers.
-    artifact_id: Option<i32>,
-    /// Whether attestation may be available for this package on the peer.
-    has_attestation: bool,
-}
-
-#[derive(Clone)]
-struct PendingCheck {
-    peer_rebuilder_id: i32,
-    peer_url: String,
-    binary_name: String,
-    binary_version: String,
-    peer_build_id: i32,
-    artifact_id: Option<i32>,
-    local_rebuild_id: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,9 +113,8 @@ pub async fn check_peers(
     let pool = pool.into_inner();
     let distribution = request.distribution.clone();
     let architecture = request.architecture.clone();
-    let rate_limit = cfg.peer_attestation_rate_limit;
     tokio::spawn(async move {
-        if let Err(e) = run_peer_check(pool, distribution, architecture, rate_limit).await {
+        if let Err(e) = run_peer_check(pool, distribution, architecture).await {
             log::error!("Peer cross-check failed: {e:#}");
         }
     });
@@ -276,19 +232,6 @@ pub async fn get_peer_package(
     drop(connection);
 
     // Live path: proxy to each peer concurrently.
-
-    // Load local sha256 (only exists when local status is GOOD with an attestation).
-    let local_sha256: Option<String> = {
-        let mut conn = pool.get().map_err(Error::from)?;
-        load_local_sha256(
-            conn.as_mut(),
-            &query.distribution,
-            &query.architecture,
-            &query.name,
-            &query.version,
-        )?
-    };
-
     let http_client = rebuilderd_common::http::client().map_err(Error::from)?;
     let name = query.name.clone();
     let version = query.version.clone();
@@ -302,11 +245,8 @@ pub async fn get_peer_package(
         let n = name.clone();
         let v = version.clone();
         let a = architecture.clone();
-        let local_sha = local_sha256.clone();
         join_set.spawn(async move {
-            let result =
-                fetch_peer_package(&client, &resolved_url, &n, &v, &a, local_sha.as_deref())
-                    .await;
+            let result = fetch_peer_package(&client, &resolved_url, &n, &v, &a).await;
             (resolved_url, result)
         });
     }
@@ -323,7 +263,6 @@ pub async fn get_peer_package(
                     build_id: None,
                     log_url: None,
                     diffoscope_url: None,
-                    sha256_match: None,
                 });
             }
             Err(e) => log::warn!("Peer package fetch task panicked: {e}"),
@@ -366,13 +305,7 @@ fn cached_peer_entries(
             .map_err(Error::from)?;
         let entry = match cached {
             Some(c) => {
-                // If peer_status is missing (pre-migration row), infer GOOD from
-                // sha256_match being set — sha256 checks only run when both sides are GOOD.
-                let status = c
-                    .peer_status
-                    .as_deref()
-                    .and_then(str_to_build_status)
-                    .or_else(|| c.sha256_match.map(|_| BuildStatus::Good));
+                let status = c.peer_status.as_deref().and_then(str_to_build_status);
                 let is_bad = status == Some(BuildStatus::Bad);
                 let log_url = c.peer_build_id.map(|id| {
                     format!("{}/builds/{id}/log", resolved_url.trim_end_matches('/'))
@@ -390,7 +323,6 @@ fn cached_peer_entries(
                     build_id: c.peer_build_id,
                     log_url,
                     diffoscope_url,
-                    sha256_match: c.sha256_match,
                 }
             }
             None => PeerStatusEntry {
@@ -399,7 +331,6 @@ fn cached_peer_entries(
                 build_id: None,
                 log_url: None,
                 diffoscope_url: None,
-                sha256_match: None,
             },
         };
         entries.push(entry);
@@ -415,7 +346,6 @@ async fn run_peer_check(
     pool: Arc<Pool>,
     distribution: String,
     architecture: String,
-    rate_limit: u32,
 ) -> Result<()> {
     let mut connection = pool.get().map_err(Error::from)?;
 
@@ -483,20 +413,16 @@ async fn run_peer_check(
         return Ok(());
     }
 
-    // Fetch local packages (with rebuild_id for cache staleness detection).
+    // Fetch local packages.
     let mut connection = pool.get().map_err(Error::from)?;
     let local_packages =
         fetch_local_packages(connection.as_mut(), &distribution, &architecture)?;
+    drop(connection);
 
-    // First pass: collect pending sha256 checks and upserts for status disagreements.
-    let mut all_pending: Vec<PendingCheck> = Vec::new();
-    // Upserts for status disagreements (peer_status populated; sha256_match = None).
-    let mut disagreement_upserts: Vec<UpsertPeerSha256Check> = Vec::new();
+    // Collect upserts for status disagreements.
+    let mut upserts: Vec<UpsertPeerSha256Check> = Vec::new();
 
     for (peer, resolved_url, peer_map) in &peer_maps {
-        // Load sha256 check cache for this peer.
-        let cache = load_peer_sha256_cache(connection.as_mut(), peer.id)?;
-
         let total = peer_map.len();
         let mut checked = 0usize;
         for ((bin_name, bin_version), peer_info) in peer_map {
@@ -518,155 +444,24 @@ async fn run_peer_check(
                 (&peer_info.status, &local_info.status),
                 (BuildStatus::Good, BuildStatus::Bad) | (BuildStatus::Bad, BuildStatus::Good)
             ) {
-                disagreement_upserts.push(UpsertPeerSha256Check {
+                upserts.push(UpsertPeerSha256Check {
                     peer_rebuilder_id: peer.id,
                     binary_name: bin_name.clone(),
                     binary_version: bin_version.clone(),
                     peer_build_id: peer_info.peer_build_id,
-                    local_rebuild_id: local_info.local_rebuild_id,
-                    sha256_match: None,
                     checked_at: chrono::Utc::now().naive_utc(),
                     peer_status: Some(build_status_to_str(&peer_info.status)),
                 });
-                continue;
-            }
-
-            // Both GOOD — check sha256 cache or schedule attestation fetch.
-            if peer_info.status == BuildStatus::Good && local_info.status == BuildStatus::Good {
-                let cache_key = (bin_name.clone(), bin_version.clone());
-                let cached = cache.get(&cache_key);
-
-                let is_fresh = cached.map_or(false, |c| {
-                    c.peer_build_id == peer_info.peer_build_id
-                        && c.local_rebuild_id == local_info.local_rebuild_id
-                });
-
-                if is_fresh {
-                    // sha256_match is already stored in peer_sha256_checks; nothing to do.
-                } else if peer_info.has_attestation {
-                    if let (Some(peer_build_id), Some(local_rebuild_id)) =
-                        (peer_info.peer_build_id, local_info.local_rebuild_id)
-                    {
-                        all_pending.push(PendingCheck {
-                            peer_rebuilder_id: peer.id,
-                            peer_url: resolved_url.clone(),
-                            binary_name: bin_name.clone(),
-                            binary_version: bin_version.clone(),
-                            peer_build_id,
-                            artifact_id: peer_info.artifact_id,
-                            local_rebuild_id,
-                        });
-                    }
-                }
             }
         }
     }
-    drop(connection);
 
     log::info!(
-        "Peer check: {distribution}/{architecture} — {} status disagreements, {} attestation checks pending",
-        disagreement_upserts.len(),
-        all_pending.len(),
+        "Peer check: {distribution}/{architecture} — {} status disagreements",
+        upserts.len(),
     );
 
-    // Group pending checks by peer so each peer gets its own independent rate-limited stream.
-    let mut pending_by_peer: HashMap<i32, Vec<PendingCheck>> = HashMap::new();
-    for item in all_pending {
-        pending_by_peer.entry(item.peer_rebuilder_id).or_default().push(item);
-    }
-
-    // Pre-load all local sha256s from DB before spawning async peer tasks.
-    let local_sha256_cache = {
-        let mut cache: HashMap<(i32, String), Option<String>> = HashMap::new();
-        if !pending_by_peer.is_empty() {
-            let mut conn = pool.get().map_err(Error::from)?;
-            for items in pending_by_peer.values() {
-                for item in items {
-                    let key = (item.local_rebuild_id, item.binary_name.clone());
-                    if !cache.contains_key(&key) {
-                        let sha256 = load_local_sha256_by_rebuild_id(
-                            conn.as_mut(),
-                            item.local_rebuild_id,
-                            &item.binary_name,
-                        )?;
-                        cache.insert(key, sha256);
-                    }
-                }
-            }
-        }
-        std::sync::Arc::new(cache)
-    };
-
-    // One rate-limited task per peer, all running concurrently.
-    // Each peer gets rate_limit requests/min independently (they go to different hosts).
-    let mut attest_set = tokio::task::JoinSet::new();
-    for (_, items) in pending_by_peer {
-        let client = http_client.clone();
-        let sha256_cache = local_sha256_cache.clone();
-        let dist = distribution.clone();
-        let arch = architecture.clone();
-        attest_set.spawn(async move {
-            let peer_url = items.first().map(|i| i.peer_url.as_str()).unwrap_or("").to_owned();
-            let interval_ms = 60_000u64 / rate_limit.max(1) as u64;
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-            let total = items.len();
-            let mut upserts: Vec<UpsertPeerSha256Check> = Vec::new();
-
-            for (i, item) in items.iter().enumerate() {
-                interval.tick().await;
-                if i % 100 == 0 || i + 1 == total {
-                    log::info!(
-                        "Peer check [{peer_url}]: attestation {}/{total} for {dist}/{arch}",
-                        i + 1,
-                    );
-                }
-
-                let peer_sha256 = fetch_peer_sha256(
-                    &client,
-                    &item.peer_url,
-                    &item.binary_name,
-                    item.peer_build_id,
-                    item.artifact_id,
-                )
-                .await;
-
-                // Skip caching on connection failure so it's retried next run.
-                let Some(peer_sha256) = peer_sha256 else { continue };
-
-                let local_sha256 = sha256_cache
-                    .get(&(item.local_rebuild_id, item.binary_name.clone()))
-                    .and_then(|opt| opt.as_deref().map(str::to_owned));
-
-                let sha256_match = local_sha256.as_deref().map(|l| l == peer_sha256);
-
-                upserts.push(UpsertPeerSha256Check {
-                    peer_rebuilder_id: item.peer_rebuilder_id,
-                    binary_name: item.binary_name.clone(),
-                    binary_version: item.binary_version.clone(),
-                    peer_build_id: Some(item.peer_build_id),
-                    local_rebuild_id: Some(item.local_rebuild_id),
-                    sha256_match,
-                    checked_at: chrono::Utc::now().naive_utc(),
-                    peer_status: Some("GOOD".to_owned()),
-                });
-            }
-
-            upserts
-        });
-    }
-
-    let mut upserts: Vec<UpsertPeerSha256Check> = disagreement_upserts;
-    while let Some(task_result) = attest_set.join_next().await {
-        match task_result {
-            Ok(peer_upserts) => upserts.extend(peer_upserts),
-            Err(e) => log::warn!("Peer attestation task panicked: {e}"),
-        }
-    }
-
-    // Upsert sha256 check results into the cache table.
+    // Upsert disagreement results into the cache table.
     if !upserts.is_empty() {
         let mut conn = pool.get().map_err(Error::from)?;
         conn.transaction(|conn| {
@@ -686,7 +481,7 @@ async fn run_peer_check(
         })
         .map_err(Error::from)?;
         log::info!(
-            "Peer check: cached {} sha256 results for {distribution}/{architecture}",
+            "Peer check: cached {} disagreement results for {distribution}/{architecture}",
             upserts.len(),
         );
     }
@@ -737,210 +532,21 @@ fn fetch_local_packages(
             binary_packages::version,
             rebuild_artifacts::status.nullable(),
             r1.field(rebuilds::status).assume_not_null().nullable(),
-            r1.field(rebuilds::id).nullable(),
         ))
-        .get_results::<(
-            String,
-            String,
-            Option<BuildStatus>,
-            Option<BuildStatus>,
-            Option<i32>,
-        )>(conn)
+        .get_results::<(String, String, Option<BuildStatus>, Option<BuildStatus>)>(conn)
         .map_err(Error::from)?;
 
     let mut map = HashMap::with_capacity(rows.len());
-    for (bin_name, bin_version, artifact_status, rebuild_status, local_rebuild_id) in rows {
+    for (bin_name, bin_version, artifact_status, rebuild_status) in rows {
         // Artifact-level status (GOOD/BAD) takes priority; fall back to
         // build-level status (FAIL) if no artifact row.
         let effective = artifact_status.or(rebuild_status).unwrap_or(BuildStatus::Unknown);
         map.insert(
             (bin_name, bin_version),
-            LocalPkgInfo {
-                local_rebuild_id,
-                status: effective,
-            },
+            LocalPkgInfo { status: effective },
         );
     }
     Ok(map)
-}
-
-// ---------------------------------------------------------------------------
-// Peer sha256 cache helpers
-// ---------------------------------------------------------------------------
-
-/// Loads the sha256 check cache for a single peer rebuilder.
-fn load_peer_sha256_cache(
-    conn: &mut SqliteConnection,
-    peer_rebuilder_id: i32,
-) -> Result<HashMap<(String, String), PeerSha256Check>> {
-    let rows = peer_sha256_checks::table
-        .filter(peer_sha256_checks::peer_rebuilder_id.eq(peer_rebuilder_id))
-        .get_results::<PeerSha256Check>(conn)
-        .map_err(Error::from)?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| ((r.binary_name.clone(), r.binary_version.clone()), r))
-        .collect())
-}
-
-// ---------------------------------------------------------------------------
-// Local attestation sha256 loaders
-// ---------------------------------------------------------------------------
-
-/// Returns the sha256 of the latest GOOD local rebuild of the named artifact,
-/// or `None` if no GOOD rebuild with an attestation exists.
-fn load_local_sha256(
-    conn: &mut SqliteConnection,
-    distribution: &str,
-    architecture: &str,
-    name: &str,
-    version: &str,
-) -> Result<Option<String>> {
-    let row = diesel::sql_query(
-        "SELECT al.attestation_log
-         FROM binary_packages bp
-         JOIN build_inputs bi ON bi.id = bp.build_input_id
-         JOIN source_packages sp ON sp.id = bi.source_package_id
-         JOIN rebuilds r ON r.build_input_id = bi.id
-         JOIN rebuild_artifacts ra ON ra.rebuild_id = r.id AND ra.name = bp.name
-         JOIN attestation_logs al ON al.id = ra.attestation_log_id
-         WHERE bp.name = ? AND bp.version = ? AND bp.architecture = ?
-           AND sp.distribution = ?
-           AND ra.status = 'GOOD'
-         ORDER BY r.built_at DESC
-         LIMIT 1",
-    )
-    .bind::<diesel::sql_types::Text, _>(name)
-    .bind::<diesel::sql_types::Text, _>(version)
-    .bind::<diesel::sql_types::Text, _>(architecture)
-    .bind::<diesel::sql_types::Text, _>(distribution)
-    .get_result::<LocalAttestationRow>(conn)
-    .optional()
-    .map_err(Error::from)?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    extract_sha256_from_attestation_bytes(&row.attestation_log, name)
-}
-
-/// Loads the sha256 for a specific local rebuild ID (for the bulk check cache path).
-fn load_local_sha256_by_rebuild_id(
-    conn: &mut SqliteConnection,
-    rebuild_id: i32,
-    artifact_name: &str,
-) -> Result<Option<String>> {
-    let row = diesel::sql_query(
-        "SELECT al.attestation_log
-         FROM rebuild_artifacts ra
-         JOIN attestation_logs al ON al.id = ra.attestation_log_id
-         WHERE ra.rebuild_id = ? AND ra.name = ? AND ra.status = 'GOOD'
-         LIMIT 1",
-    )
-    .bind::<diesel::sql_types::Integer, _>(rebuild_id)
-    .bind::<diesel::sql_types::Text, _>(artifact_name)
-    .get_result::<LocalAttestationRow>(conn)
-    .optional()
-    .map_err(Error::from)?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    extract_sha256_from_attestation_bytes(&row.attestation_log, artifact_name)
-}
-
-/// Decompress (if zstd) and extract the sha256 for `artifact_name` from an
-/// in-toto attestation blob. Returns the first product sha256 whose key
-/// contains the artifact name, or any product sha256 if there is only one.
-fn extract_sha256_from_attestation_bytes(
-    bytes: &[u8],
-    artifact_name: &str,
-) -> Result<Option<String>> {
-    let json_bytes: Vec<u8> = if bytes.first().copied() == Some(0x28)
-        && bytes.get(1).copied() == Some(0xb5)
-    {
-        // zstd magic: 0xFD2FB528 (little-endian first bytes are 0x28, 0xB5)
-        zstd::stream::decode_all(bytes)?
-    } else {
-        bytes.to_vec()
-    };
-
-    let attestation: AttestationJson = match serde_json::from_slice(&json_bytes) {
-        Ok(a) => a,
-        Err(e) => {
-            log::warn!("Failed to parse attestation JSON: {e}");
-            return Ok(None);
-        }
-    };
-
-    // Prefer the product whose filename matches; fall back to first product.
-    let sha256 = attestation
-        .signed
-        .products
-        .iter()
-        .find(|(k, _)| k.contains(artifact_name))
-        .or_else(|| attestation.signed.products.iter().next())
-        .and_then(|(_, p)| p.sha256.clone());
-
-    Ok(sha256)
-}
-
-// ---------------------------------------------------------------------------
-// Peer attestation fetcher
-// ---------------------------------------------------------------------------
-
-/// Fetch the sha256 from a peer's attestation for a GOOD package.
-/// `build_id` — peer's rebuild ID; `artifact_id` — only for v1 peers.
-async fn fetch_peer_sha256(
-    client: &rebuilderd_common::http::Client,
-    peer_url: &str,
-    artifact_name: &str,
-    build_id: i32,
-    artifact_id: Option<i32>,
-) -> Option<String> {
-    let url = if is_v0_url(peer_url) {
-        format!("{}/builds/{}/attestation", peer_url.trim_end_matches('/'), build_id)
-    } else if let Some(aid) = artifact_id {
-        format!(
-            "{}/builds/{}/artifacts/{}/attestation",
-            peer_url.trim_end_matches('/'),
-            build_id,
-            aid
-        )
-    } else {
-        return None;
-    };
-
-    let bytes = match client.get(&url).send().await {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(r) => match r.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    log::warn!("Failed to read peer attestation body from {url}: {e}");
-                    return None;
-                }
-            },
-            Err(e) => {
-                log::warn!("Peer attestation request failed {url}: {e}");
-                return None;
-            }
-        },
-        Err(e) => {
-            log::warn!("Peer attestation request error {url}: {e}");
-            return None;
-        }
-    };
-
-    match extract_sha256_from_attestation_bytes(&bytes, artifact_name) {
-        Ok(sha256) => sha256,
-        Err(e) => {
-            log::warn!("Failed to extract sha256 from peer attestation at {url}: {e}");
-            None
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,8 +621,6 @@ struct PeerBinaryPackage {
     #[serde(default)]
     artifact_id: Option<i32>,
     #[serde(default)]
-    attestation_log_id: Option<i32>,
-    #[serde(default)]
     diffoscope_log_id: Option<i32>,
     #[serde(default)]
     rebuild_status: Option<BuildStatus>,
@@ -1080,14 +684,11 @@ async fn fetch_v1_packages(
 
         for pkg in resp.records {
             let effective = pkg.status.or(pkg.rebuild_status).unwrap_or(BuildStatus::Unknown);
-            let has_attestation = pkg.attestation_log_id.is_some();
             map.insert(
                 (pkg.name, pkg.version),
                 PeerPkgInfo {
                     status: effective,
                     peer_build_id: pkg.build_id,
-                    artifact_id: pkg.artifact_id,
-                    has_attestation,
                 },
             );
         }
@@ -1124,8 +725,6 @@ struct V0PkgRelease {
     build_id: Option<i32>,
     #[serde(default)]
     has_diffoscope: bool,
-    #[serde(default)]
-    has_attestation: bool,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -1161,8 +760,6 @@ async fn fetch_v0_packages(
                 PeerPkgInfo {
                     status,
                     peer_build_id: pkg.build_id,
-                    artifact_id: None, // v0 has no artifact IDs
-                    has_attestation: pkg.has_attestation,
                 },
             )
         })
@@ -1189,12 +786,11 @@ async fn fetch_peer_package(
     name: &str,
     version: &str,
     architecture: &str,
-    local_sha256: Option<&str>,
 ) -> Result<PeerStatusEntry> {
     if is_v0_url(peer_url) {
-        fetch_v0_peer_package(client, peer_url, name, version, architecture, local_sha256).await
+        fetch_v0_peer_package(client, peer_url, name, version, architecture).await
     } else {
-        fetch_v1_peer_package(client, peer_url, name, version, architecture, local_sha256).await
+        fetch_v1_peer_package(client, peer_url, name, version, architecture).await
     }
 }
 
@@ -1204,7 +800,6 @@ async fn fetch_v1_peer_package(
     name: &str,
     version: &str,
     architecture: &str,
-    local_sha256: Option<&str>,
 ) -> Result<PeerStatusEntry> {
     let url = format!("{}/packages/binary", peer_url.trim_end_matches('/'));
     let resp: PeerResultPage = client
@@ -1225,19 +820,6 @@ async fn fetch_v1_peer_package(
     if let Some(pkg) = resp.records.into_iter().next() {
         let effective = pkg.status.or(pkg.rebuild_status);
         let is_bad = effective == Some(BuildStatus::Bad);
-        let sha256_match = if effective == Some(BuildStatus::Good) {
-            if let (Some(local), Some(bid), Some(aid)) =
-                (local_sha256, pkg.build_id, pkg.artifact_id)
-            {
-                let peer_sha256 =
-                    fetch_peer_sha256(client, peer_url, name, bid, Some(aid)).await;
-                peer_sha256.map(|p| p == local)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
         let (log_url, diffoscope_url) = match pkg.build_id {
             Some(bid) => v1_urls(peer_url, bid, pkg.artifact_id, pkg.diffoscope_log_id, is_bad),
             None => (None, None),
@@ -1248,7 +830,6 @@ async fn fetch_v1_peer_package(
             build_id: pkg.build_id,
             log_url,
             diffoscope_url,
-            sha256_match,
         })
     } else {
         Ok(PeerStatusEntry {
@@ -1257,7 +838,6 @@ async fn fetch_v1_peer_package(
             build_id: None,
             log_url: None,
             diffoscope_url: None,
-            sha256_match: None,
         })
     }
 }
@@ -1268,7 +848,6 @@ async fn fetch_v0_peer_package(
     name: &str,
     version: &str,
     architecture: &str,
-    local_sha256: Option<&str>,
 ) -> Result<PeerStatusEntry> {
     let url = format!("{}/pkgs/list", peer_url.trim_end_matches('/'));
     let packages: Vec<V0PkgRelease> = client
@@ -1284,17 +863,6 @@ async fn fetch_v0_peer_package(
     if let Some(pkg) = packages.into_iter().find(|p| p.version == version) {
         let peer_status = v0_to_build_status(pkg.status);
         let is_bad = peer_status == BuildStatus::Bad;
-        let sha256_match = if peer_status == BuildStatus::Good && pkg.has_attestation {
-            if let (Some(local), Some(bid)) = (local_sha256, pkg.build_id) {
-                let peer_sha256 =
-                    fetch_peer_sha256(client, peer_url, name, bid, None).await;
-                peer_sha256.map(|p| p == local)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
         let (log_url, diffoscope_url) = match pkg.build_id {
             Some(bid) => v0_urls(peer_url, bid, pkg.has_diffoscope, is_bad),
             None => (None, None),
@@ -1305,7 +873,6 @@ async fn fetch_v0_peer_package(
             build_id: pkg.build_id,
             log_url,
             diffoscope_url,
-            sha256_match,
         })
     } else {
         Ok(PeerStatusEntry {
@@ -1314,7 +881,6 @@ async fn fetch_v0_peer_package(
             build_id: None,
             log_url: None,
             diffoscope_url: None,
-            sha256_match: None,
         })
     }
 }
