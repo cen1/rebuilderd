@@ -7,7 +7,7 @@ info:
     workers, enqueue work, claim packages for building, and more.
   version: 1.0.0
 servers:
-  - url: 'https://reproduce.algiz.nu/api/v1'
+  - url: '/api/v1'
 tags:
   - name: worker
     description: Queries related to or used by workers

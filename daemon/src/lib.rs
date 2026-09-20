@@ -75,6 +75,8 @@ pub fn build_server(
                     )
                     .service(
                         scope("/v1")
+                            .service(api::v1::get_openapi_spec)
+                            .service(api::v1::get_api_docs)
                             .service(
                                 scope("/builds")
                                     .service(api::v1::get_builds)

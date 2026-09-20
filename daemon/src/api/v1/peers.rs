@@ -461,30 +461,28 @@ async fn run_peer_check(
         upserts.len(),
     );
 
-    // Upsert disagreement results into the cache table.
-    if !upserts.is_empty() {
-        let mut conn = pool.get().map_err(Error::from)?;
-        conn.transaction(|conn| {
-            for upsert in &upserts {
-                diesel::insert_into(peer_sha256_checks::table)
-                    .values(upsert)
-                    .on_conflict((
-                        peer_sha256_checks::peer_rebuilder_id,
-                        peer_sha256_checks::binary_name,
-                        peer_sha256_checks::binary_version,
-                    ))
-                    .do_update()
-                    .set(upsert)
-                    .execute(conn)?;
-            }
-            Ok::<_, diesel::result::Error>(())
-        })
-        .map_err(Error::from)?;
-        log::info!(
-            "Peer check: cached {} disagreement results for {distribution}/{architecture}",
-            upserts.len(),
-        );
-    }
+    // Replace disagreement results atomically: delete stale entries for all peers that were
+    // successfully compared, then insert the current set.  This ensures that previously-cached
+    // disagreements which are now resolved (both sides agree) are removed rather than
+    // accumulated indefinitely.
+    let compared_peer_ids: Vec<i32> = peer_maps.iter().map(|(peer, _, _)| peer.id).collect();
+    let mut conn = pool.get().map_err(Error::from)?;
+    conn.transaction(|conn| {
+        diesel::delete(peer_sha256_checks::table)
+            .filter(peer_sha256_checks::peer_rebuilder_id.eq_any(&compared_peer_ids))
+            .execute(conn)?;
+        for upsert in &upserts {
+            diesel::insert_into(peer_sha256_checks::table)
+                .values(upsert)
+                .execute(conn)?;
+        }
+        Ok::<_, diesel::result::Error>(())
+    })
+    .map_err(Error::from)?;
+    log::info!(
+        "Peer check: cached {} disagreement results for {distribution}/{architecture}",
+        upserts.len(),
+    );
 
     Ok(())
 }

@@ -8,4 +8,5 @@ worker/build
 worker/cache
 daemon/rebuilderd.db*
 contrib
+!contrib/docs/rebuilderd-v*.yml
 /data

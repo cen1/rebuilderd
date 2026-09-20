@@ -19,7 +19,7 @@ use rebuilderd_common::api::v1::{
     SourceIdentityFilter,
 };
 use rebuilderd_common::config::PING_DEADLINE;
-use log::debug;
+use log::{debug, info};
 use rebuilderd_common::errors::Error;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -105,7 +105,7 @@ pub async fn request_rebuild(
     request: web::Json<QueueJobRequest>,
 ) -> web::Result<impl Responder> {
     if auth::admin(&cfg, &req).is_err() {
-        return Ok(HttpResponse::Forbidden());
+        return Ok(HttpResponse::Forbidden().finish());
     }
 
     let mut connection = pool.get().map_err(Error::from)?;
@@ -128,7 +128,6 @@ pub async fn request_rebuild(
     let mut sql = source_packages::table
         .inner_join(build_inputs::table)
         .inner_join(binary_packages::table)
-        .filter(source_packages::seen_in_last_sync.is(true))
         .filter(
             origin_filter
                 .clone()
@@ -141,6 +140,12 @@ pub async fn request_rebuild(
         )
         .select((build_inputs::id, source_packages::last_seen))
         .into_boxed();
+
+    // Only apply the seen_in_last_sync filter for bulk requeues (no specific name).
+    // When a specific package name is given, the user explicitly wants that package.
+    if source_identity_filter.name.is_none() {
+        sql = sql.filter(source_packages::seen_in_last_sync.is(true));
+    }
 
     if let Some(status) = queue_request.status {
         // Use EXISTS subqueries restricted to the latest rebuild (max id) per build_input,
@@ -185,8 +190,24 @@ pub async fn request_rebuild(
         .get_results::<(i32, NaiveDateTime)>(connection.as_mut())
         .map_err(Error::from)?;
 
+    // Deduplicate build_input IDs (the binary_packages join can produce duplicates)
+    let mut seen = std::collections::HashSet::new();
+    let build_input_ids: Vec<i32> = build_inputs
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| seen.insert(*id))
+        .collect();
+
+    info!(
+        "request_rebuild matched {} build inputs",
+        build_input_ids.len()
+    );
+
     let now = Utc::now();
-    for (build_input_id, _) in build_inputs {
+    let next_retry = (now - Duration::minutes(1)).naive_utc();
+    let priority = queue_request.priority.unwrap_or(Priority::manual());
+
+    for build_input_id in &build_input_ids {
         // Reset the latest rebuild's status (and its artifacts) to NULL so the
         // package immediately appears as UNKWN rather than retaining the old result.
         if queue_request.reset {
@@ -214,49 +235,25 @@ pub async fn request_rebuild(
             }
         }
 
-        let next_retry = (now - Duration::minutes(1)).naive_utc();
-        let priority = queue_request.priority.unwrap_or(Priority::manual());
-        if has_queued_friend(connection.as_mut(), build_input_id)? {
-            // set the priority of the queued item
-            diesel::update(
-                queue::table
-                    .filter(queue::build_input_id.eq_any(build_input_friends(build_input_id))),
-            )
-            .set(queue::priority.eq(priority))
+        // Set next_retry and upsert queue entry directly for this build_input.
+        // We skip the friends logic here because stale friend queue entries from
+        // orphaned build_inputs can prevent the active build_input from being queued.
+        diesel::update(build_inputs::table)
+            .filter(build_inputs::id.eq(build_input_id))
+            .set(build_inputs::next_retry.eq(next_retry))
             .execute(connection.as_mut())
             .map_err(Error::from)?;
 
-            // reset the next_retry where applicable
-            let friends_in_queue = queue::table
-                .filter(queue::build_input_id.eq_any(build_input_friends(build_input_id)))
-                .select(queue::build_input_id)
-                .load::<i32>(connection.as_mut())
-                .map_err(Error::from)?;
+        let new_queued_job = NewQueued {
+            build_input_id: *build_input_id,
+            priority,
+            queued_at: now.naive_utc(),
+        };
 
-            diesel::update(build_inputs::table.filter(build_inputs::id.eq_any(friends_in_queue)))
-                .set(build_inputs::next_retry.eq(next_retry))
-                .execute(connection.as_mut())
-                .map_err(Error::from)?;
-            continue;
-        } else {
-            // no applicable queued item, set directly and upsert a new queued job
-            diesel::update(build_inputs::table)
-                .filter(build_inputs::id.eq(build_input_id))
-                .set(build_inputs::next_retry.eq(next_retry))
-                .execute(connection.as_mut())
-                .map_err(Error::from)?;
-
-            let new_queued_job = NewQueued {
-                build_input_id,
-                priority,
-                queued_at: now.naive_utc(),
-            };
-
-            new_queued_job.upsert(connection.as_mut())?;
-        }
+        new_queued_job.upsert(connection.as_mut())?;
     }
 
-    Ok(HttpResponse::NoContent())
+    Ok(HttpResponse::Ok().json(build_inputs.len()))
 }
 
 #[delete("")]

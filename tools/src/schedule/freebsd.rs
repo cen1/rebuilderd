@@ -253,6 +253,11 @@ pub async fn sync(http: &http::Client, sync: &PkgsSync) -> Result<Vec<PackageRep
             // Grouping them under one SourcePackageReport means one build_input and
             // one queue entry per port, and poudriere produces all split packages in
             // a single run anyway.
+            // Sort by package name so the first package per origin is deterministic.
+            // The first package's URL becomes the build_input URL, and the unique
+            // constraint includes URL - unstable ordering creates duplicate build_inputs.
+            package_infos.sort_by(|a, b| a.pkg.name.cmp(&b.pkg.name));
+
             let mut groups: HashMap<(String, String), SourcePackageReport> = HashMap::new();
             for info in package_infos {
                 let fbsd_ports_top_git_timestamp = info.git_hash.as_ref()

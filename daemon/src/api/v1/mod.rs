@@ -1,5 +1,6 @@
 mod build;
 mod dashboard;
+mod docs;
 mod meta;
 mod package;
 mod peers;
@@ -10,6 +11,7 @@ mod worker;
 
 pub use build::*;
 pub use dashboard::*;
+pub use docs::*;
 pub use meta::*;
 pub use package::*;
 pub use peers::*;

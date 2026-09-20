@@ -61,19 +61,67 @@ set -eo pipefail
 
 echo "Starting rebuild of ${1} at $(date -u)"
 
-# Cleanup function for unexpected exits
-cleanup_on_exit() {
-  if [ -n "$JAIL" ] && [ -n "$PORTS_TREE" ]; then
-    JAIL_NAME="${JAIL}-${PORTS_TREE}"
-    if jls -j "$JAIL_NAME" jid 2>/dev/null >/dev/null; then
-      echo "Cleaning up: stopping jail $JAIL_NAME..."
-      poudriere jail -k -j "$JAIL" -p "$PORTS_TREE" 2>/dev/null || poudriere jail -k -j "$JAIL" 2>/dev/null || true
+# Force-stop a jail by JID, killing all processes inside it
+force_kill_jail() {
+  local jail_name="$1"
+  local jid
+  jid=$(jls -j "$jail_name" jid 2>/dev/null) || return 0
+  [ -z "$jid" ] && return 0
+  echo "Force-killing all processes in jail $jail_name (JID $jid)..."
+  jexec "$jid" killall -9 2>/dev/null || true
+  sleep 2
+}
+
+# Stop jail and wait up to WAIT_SECS seconds; force-kill if needed.
+# Safe to call even if the jail is not running.
+stop_jail_wait() {
+  local jail_name="${JAIL}-${PORTS_TREE}"
+  jls -j "$jail_name" jid 2>/dev/null >/dev/null || return 0
+
+  echo "Stopping jail $jail_name..."
+  poudriere jail -k -j "$JAIL" -p "$PORTS_TREE" 2>/dev/null \
+    || poudriere jail -k -j "$JAIL" 2>/dev/null \
+    || true
+
+  local waited=0
+  local limit="${1:-60}"
+  while jls -j "$jail_name" jid 2>/dev/null >/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then
+      echo "Jail did not stop after ${limit}s — force-killing..."
+      force_kill_jail "$jail_name"
+      # One last grace period
+      local grace=0
+      while jls -j "$jail_name" jid 2>/dev/null >/dev/null && [ "$grace" -lt 10 ]; do
+        sleep 1
+        grace=$((grace + 1))
+      done
+      break
     fi
+    echo "Waiting for jail to stop... ($waited/${limit}s)"
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if jls -j "$jail_name" jid 2>/dev/null >/dev/null; then
+    echo "Warning: jail $jail_name could not be stopped." >&2
+  else
+    echo "Jail $jail_name stopped."
+  fi
+}
+
+# Cleanup function - always runs on exit (success or failure).
+# Ensures the jail and stale build state are cleaned up so the next
+# job can start a fresh poudriere run without hitting "jail already running".
+cleanup_on_exit() {
+  local building_dir="/usr/local/poudriere/data/packages/${JAIL}-${PORTS_TREE}/.building"
+  stop_jail_wait 60
+  if [ -d "$building_dir" ]; then
+    echo "Removing leftover build state: $building_dir"
+    rm -rf "$building_dir"
   fi
   rm -f /tmp/poudriere_output.log
 }
 
-# Set trap to cleanup on exit (except normal exit 0)
 trap cleanup_on_exit EXIT
 
 # Ensure output directory is set
@@ -130,7 +178,7 @@ PKG_ARCH=$(echo "$PKG_ARCH_FULL" | cut -d ':' -f 3)
 [ "$PKG_ARCH" = "*" ] && PKG_ARCH="amd64"
 
 # Extract FreeBSD version to determine RELEASE version
-FREEBSD_VERSION_NUM=$(pkg info -F "$INPUT_PKG" | grep 'FreeBSD_version' | awk '{print $2}')
+FREEBSD_VERSION_NUM=$(pkg info -F "$INPUT_PKG" | { grep 'FreeBSD_version' || true; } | awk '{print $2}')
 
 # For noarch packages (arch=*), FreeBSD_version may not be present
 # In that case, default to MAJOR.0-RELEASE
@@ -251,8 +299,15 @@ fi
 # Failed retried packages obviously break that logic but we have to live with that for now.
 PORTS_DIR="/usr/local/poudriere/ports/${PORTS_TREE}"
 if [ ! -d "$PORTS_DIR/.git" ]; then
-  echo "Error: Poudriere ports tree '$PORTS_DIR' is not a git repository." >&2
-  exit 1
+  echo "Ports tree '$PORTS_DIR' exists but is not a git repository, recreating..."
+  poudriere ports -d -p "$PORTS_TREE" 2>/dev/null || true
+  rm -rf "$PORTS_DIR"
+  poudriere ports -c -p "$PORTS_TREE" -m git+https -D
+  if [ ! -d "$PORTS_DIR/.git" ]; then
+    echo "Error: Failed to recreate ports tree '$PORTS_TREE'." >&2
+    exit 1
+  fi
+  echo "Ports tree '$PORTS_TREE' recreated successfully."
 fi
 
 echo "Checking out ports tree commit $PORTS_GIT_HASH in $PORTS_DIR"
@@ -278,43 +333,9 @@ else
   echo "Warning: Could not get commit time from git" >&2
 fi
 
-# Function to stop jail and wait for it to fully stop
-stop_jail_if_running() {
-  # Check for jail with ports tree suffix (poudriere uses jail-portstree format when running)
-  JAIL_NAME="${JAIL}-${PORTS_TREE}"
-  if jls -j "$JAIL_NAME" jid 2>/dev/null >/dev/null; then
-    echo "Jail ${JAIL_NAME} is running — stopping it..."
-    poudriere jail -k -j "${JAIL}" -p "${PORTS_TREE}" 2>/dev/null || poudriere jail -k -j "${JAIL}" 2>/dev/null || true
-
-    # Wait up to 30 seconds for jail to stop
-    WAIT_COUNT=0
-    while jls -j "$JAIL_NAME" jid 2>/dev/null >/dev/null; do
-      if [ $WAIT_COUNT -ge 30 ]; then
-        echo "Warning: Jail did not stop after 30 seconds, forcing cleanup..."
-        jls -j "$JAIL_NAME" jid 2>/dev/null | xargs -r jexec {} killall -9 2>/dev/null || true
-        sleep 2
-        break
-      fi
-      echo "Waiting for jail to stop... ($WAIT_COUNT/30)"
-      sleep 1
-      WAIT_COUNT=$((WAIT_COUNT + 1))
-    done
-
-    if ! jls -j "$JAIL_NAME" jid 2>/dev/null >/dev/null; then
-      echo "Jail ${JAIL} stopped successfully."
-    fi
-  fi
-}
-
-# Check if the jail is running (can stay up when stopping the service)
-stop_jail_if_running
-
-# Clean up any leftover build state from previous failed builds
-BUILDING_DIR="/usr/local/poudriere/data/packages/${JAIL}-${PORTS_TREE}/.building"
-if [ -d "$BUILDING_DIR" ]; then
-  echo "Cleaning up leftover build state from $BUILDING_DIR..."
-  rm -rf "$BUILDING_DIR"
-fi
+# Check if the jail is running from a previous crashed build and stop it.
+# Also clear any leftover .building state.
+stop_jail_wait
 
 # Configure git in the jail to use 10-char abbreviated hashes
 # Only affects non-reproducability of MANIFEST which we ignore anyway at the moment.
@@ -354,13 +375,8 @@ POUDRIERE_EXIT=${PIPESTATUS[0]}
 set -e
 
 if [ "$POUDRIERE_EXIT" -ne 0 ]; then
-  # Check if the error was "jail already running"
-  if grep -qi "jail already running" /tmp/poudriere_output.log; then
-    echo "Error: Jail already running detected. Stopping the jail..."
-    stop_jail_if_running
-  fi
-  rm -f /tmp/poudriere_output.log
   echo "Error: Poudriere build failed with exit code $POUDRIERE_EXIT" >&2
+  # cleanup_on_exit (trap) will stop the jail and remove stale state
   exit 1
 fi
 
@@ -399,10 +415,12 @@ fi
 POUDRIERE_PKG_DIR="/usr/local/poudriere/data/packages/${JAIL}-${PORTS_TREE}/.latest/All"
 
 echo "Collecting all packages for origin '$ORIGIN'..."
+echo "  .latest -> $(readlink "${POUDRIERE_PKG_DIR%/All}" 2>&1 || echo 'MISSING')"
+echo "  pkg count in All/: $(ls "$POUDRIERE_PKG_DIR"/*.pkg 2>/dev/null | wc -l)"
 pkg_count=0
 for pkg_file in "$POUDRIERE_PKG_DIR"/*.pkg; do
     [ -f "$pkg_file" ] || continue
-    file_origin=$(pkg info -F "$pkg_file" | awk '/^Origin/ {print $2}')
+    file_origin=$(pkg info -F "$pkg_file" | awk '/^Origin/ {print $NF}')
     if [ "$file_origin" = "$ORIGIN" ]; then
         mv "$pkg_file" "$REBUILDERD_OUTDIR/"
         echo "  Moved: $(basename "$pkg_file")"

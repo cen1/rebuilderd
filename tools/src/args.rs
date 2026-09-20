@@ -241,6 +241,15 @@ pub struct QueueList {
     pub json: bool,
     #[arg(short, long)]
     pub planned: bool,
+    /// Filter by distribution
+    #[arg(long)]
+    pub distro: Option<String>,
+    /// Filter by release
+    #[arg(long)]
+    pub release: Option<String>,
+    /// Filter by architecture
+    #[arg(long)]
+    pub architecture: Option<String>,
 }
 
 #[derive(Debug, Parser)]

@@ -195,8 +195,9 @@ async fn main() -> Result<()> {
                 vec![BuildStatus::Bad, BuildStatus::Fail, BuildStatus::Unknown]
             };
 
+            let mut total = 0;
             for status in statuses {
-                client
+                let count = client
                     .request_rebuild(QueueJobRequest {
                         distribution: args.distro.clone(),
                         release: None,
@@ -209,7 +210,9 @@ async fn main() -> Result<()> {
                         reset: args.reset,
                     })
                     .await?;
+                total += count;
             }
+            eprintln!("Requeued {total} build inputs");
         }
         SubCommand::Pkgs(Pkgs::Sync(args)) => sync(client.with_auth_cookie()?, args).await?,
         SubCommand::Pkgs(Pkgs::SyncProfile(args)) => {
@@ -400,13 +403,30 @@ async fn main() -> Result<()> {
                 limit: Some(1000),
                 before: None,
                 after: None,
-                sort: None,
+                sort: Some("priority".to_string()),
                 direction: None,
+            };
+
+            let origin_filter = OriginFilter {
+                distribution: ls.distro.clone(),
+                release: ls.release.clone(),
+                component: None,
+                architecture: ls.architecture.clone(),
+            };
+            let origin_filter_ref = if origin_filter.distribution.is_some()
+                || origin_filter.release.is_some()
+                || origin_filter.architecture.is_some()
+            {
+                Some(&origin_filter)
+            } else {
+                None
             };
 
             let mut output_lines_limit = if ls.head { 25 } else { usize::MAX };
             while output_lines_limit > 0 {
-                let mut results = client.get_queued_jobs(Some(&page), None, None, None).await?;
+                let mut results = client
+                    .get_queued_jobs(Some(&page), origin_filter_ref, None, None)
+                    .await?;
                 if let Some(last) = results.records.last() {
                     page.after = Some(last.id);
                 } else {
@@ -483,8 +503,8 @@ async fn main() -> Result<()> {
         SubCommand::Queue(Queue::Delete(push)) => {
             let origin_filter = OriginFilter {
                 distribution: Some(push.distro.clone()),
-                release: None, // TODO: ls.filter.release,
-                component: push.suite.clone(),
+                release: push.suite.clone(),
+                component: None,
                 architecture: push.architecture.clone(),
             };
 

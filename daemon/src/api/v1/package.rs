@@ -692,7 +692,8 @@ pub async fn get_binary_packages(
             let status_values: Vec<String> = statuses.iter().map(|s| s.to_uppercase()).collect();
 
             // For binary packages, status semantics differ by level:
-            // - UNKWN: no rebuild has been attempted yet (r1 left join produces NULL row)
+            // - UNKWN: no rebuild exists (r1 left join → NULL), or latest rebuild
+            //   was reset (r1.status IS NULL while r1.id IS NOT NULL)
             // - FAIL: build ran but failed before producing artifacts (rebuilds.status = FAIL,
             //         no artifact rows → rebuild_artifacts.status is NULL for these)
             // - GOOD/BAD: stored per-artifact in rebuild_artifacts.status
@@ -705,25 +706,26 @@ pub async fn get_binary_packages(
                 .collect();
             let has_artifacts = !artifact_statuses.is_empty();
 
+            // r1.status IS NULL covers both "no rebuild" and "reset rebuild"
             match (has_unkwn, has_fail, has_artifacts) {
                 (true, true, true) => query = query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(r1.field(rebuilds::status).is(BuildStatus::Fail))
                         .or(rebuild_artifacts::status.is_not_null().and(
                             rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                         )),
                 ),
                 (true, true, false) => query = query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(r1.field(rebuilds::status).is(BuildStatus::Fail)),
                 ),
                 (true, false, true) => query = query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(rebuild_artifacts::status.is_not_null().and(
                             rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                         )),
                 ),
-                (true, false, false) => query = query.filter(r1.field(rebuilds::id).is_null()),
+                (true, false, false) => query = query.filter(r1.field(rebuilds::status).is_null()),
                 (false, true, true) => query = query.filter(
                     r1.field(rebuilds::status).is(BuildStatus::Fail)
                         .or(rebuild_artifacts::status.is_not_null().and(
@@ -812,23 +814,23 @@ pub async fn get_binary_packages(
 
             match (has_unkwn, has_fail, has_artifacts) {
                 (true, true, true) => count_query = count_query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(r1.field(rebuilds::status).is(BuildStatus::Fail))
                         .or(rebuild_artifacts::status.is_not_null().and(
                             rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                         )),
                 ),
                 (true, true, false) => count_query = count_query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(r1.field(rebuilds::status).is(BuildStatus::Fail)),
                 ),
                 (true, false, true) => count_query = count_query.filter(
-                    r1.field(rebuilds::id).is_null()
+                    r1.field(rebuilds::status).is_null()
                         .or(rebuild_artifacts::status.is_not_null().and(
                             rebuild_artifacts::status.assume_not_null().eq_any(artifact_statuses),
                         )),
                 ),
-                (true, false, false) => count_query = count_query.filter(r1.field(rebuilds::id).is_null()),
+                (true, false, false) => count_query = count_query.filter(r1.field(rebuilds::status).is_null()),
                 (false, true, true) => count_query = count_query.filter(
                     r1.field(rebuilds::status).is(BuildStatus::Fail)
                         .or(rebuild_artifacts::status.is_not_null().and(
